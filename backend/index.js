@@ -263,6 +263,46 @@ app.put('/api/barang/:id', autentikasiAdmin, async (req, res) => {
   }
 });
 
+app.delete('/api/barang/:id', autentikasiAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    return res.status(400).json({
+      message: 'ID barang tidak valid.',
+    });
+  }
+
+  try {
+    const result = await db.query(
+      'DELETE FROM barang WHERE id = $1 RETURNING id, nama',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: 'Barang tidak ditemukan.',
+      });
+    }
+
+    return res.json({
+      message: 'Barang berhasil dihapus.',
+      data: result.rows[0],
+    });
+  } catch (error) {
+    if (error.code === '23503') {
+      return res.status(409).json({
+        message:
+          'Barang tidak bisa dihapus karena sudah tercatat dalam riwayat pesanan.',
+      });
+    }
+
+    console.error('Gagal menghapus barang:', error.message);
+    return res.status(500).json({
+      message: 'Terjadi kesalahan saat menghapus barang.',
+    });
+  }
+});
+
 // ========================
 // TRANSAKSI DATABASE
 // ========================

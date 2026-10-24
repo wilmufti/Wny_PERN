@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 const API = 'http://localhost:3000/api';
 const API_BARANG = `${API}/barang`;
@@ -41,12 +41,62 @@ function labelStatus(status) {
   return labels[status] || status || 'Status tidak diketahui';
 }
 
+async function kompresFoto(file) {
+  const tipeDiizinkan = ['image/jpeg', 'image/png', 'image/webp'];
+
+  if (!tipeDiizinkan.includes(file.type)) {
+    throw new Error('Pilih foto berformat JPG, PNG, atau WebP.');
+  }
+
+  if (file.size > 12 * 1024 * 1024) {
+    throw new Error('Ukuran foto maksimal 12 MB sebelum diproses.');
+  }
+
+  const bitmap = await createImageBitmap(file);
+
+  try {
+    const ukuranMaksimal = [1000, 850, 700, 550, 450];
+    const kualitas = [0.82, 0.72, 0.62, 0.52, 0.42];
+
+    for (const batasSisi of ukuranMaksimal) {
+      const skala = Math.min(
+        1,
+        batasSisi / Math.max(bitmap.width, bitmap.height)
+      );
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * skala));
+      canvas.height = Math.max(1, Math.round(bitmap.height * skala));
+
+      const context = canvas.getContext('2d');
+      if (!context) {
+        throw new Error('Foto gagal diproses oleh browser.');
+      }
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      for (const kualitasJpeg of kualitas) {
+        const hasil = canvas.toDataURL('image/jpeg', kualitasJpeg);
+        if (hasil.length <= 700_000) return hasil;
+      }
+    }
+
+    throw new Error(
+      'Foto masih terlalu besar. Coba pilih foto dengan resolusi lebih kecil.'
+    );
+  } finally {
+    bitmap.close?.();
+  }
+}
+
 function App() {
   const [barang, setBarang] = useState([]);
   const [keranjang, setKeranjang] = useState(bacaKeranjang);
   const [pencarian, setPencarian] = useState('');
   const [kategoriAktif, setKategoriAktif] = useState('Semua');
   const [halaman, setHalaman] = useState('katalog');
+  const [adminView, setAdminView] = useState('dashboard');
   const [barangDipilih, setBarangDipilih] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -55,7 +105,7 @@ function App() {
   const [metodePembayaran, setMetodePembayaran] = useState('QRIS');
   const [pesananAktif, setPesananAktif] = useState(null);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
-  const [detikTersisa, setDetikTersisa] = useState(0);
+  const [waktuSekarang, setWaktuSekarang] = useState(Date.now);
   const [memuatStatus, setMemuatStatus] = useState(false);
   const [formBarang, setFormBarang] = useState({
     nama: '',
@@ -66,6 +116,24 @@ function App() {
     foto: '',
     deskripsi: '',
   });
+  const [kategoriTambahan, setKategoriTambahan] = useState(() => {
+    try {
+      const data = JSON.parse(
+        localStorage.getItem('wny-kategori-tambahan') || '[]'
+      );
+      return Array.isArray(data)
+        ? data.filter(
+            (kategori) =>
+              typeof kategori === 'string' && kategori.trim().length > 0
+          )
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const [kategoriBaruInput, setKategoriBaruInput] = useState('');
+  const [tambahKategoriTerbuka, setTambahKategoriTerbuka] = useState(false);
+  const [fotoDiproses, setFotoDiproses] = useState(false);
   const [barangEditId, setBarangEditId] = useState(null);
 
   const [tambahBarangLoading, setTambahBarangLoading] = useState(false);
@@ -80,7 +148,7 @@ function App() {
   const [adminError, setAdminError] = useState('');
 
 
-  async function ambilBarang() {
+  const ambilBarang = useCallback(async () => {
     try {
       const response = await fetch(API_BARANG);
 
@@ -98,10 +166,37 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    ambilBarang();
+    const controller = new AbortController();
+
+    fetch(API_BARANG, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error('Gagal mengambil data barang.');
+        }
+
+        return response.json();
+      })
+      .then((data) => {
+        setBarang(data);
+        setError('');
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          setError(
+            'Data barang gagal dimuat. Pastikan backend dan database aktif.'
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
+      });
+
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -112,6 +207,25 @@ function App() {
     () => ['Semua', ...new Set(barang.map((item) => item.kategori))],
     [barang]
   );
+
+  const kategoriAdmin = useMemo(() => {
+    const kategoriProduk = barang
+      .map((item) => item.kategori)
+      .filter(
+        (kategori) => typeof kategori === 'string' && kategori.trim()
+      );
+
+    return [
+      ...new Set([
+        'Sembako',
+        'Beras',
+        'Minyak',
+        'Mie',
+        ...kategoriProduk,
+        ...kategoriTambahan,
+      ]),
+    ];
+  }, [barang, kategoriTambahan]);
 
   const hasilPencarian = barang.filter((item) => {
     const cocokPencarian = `${item.nama} ${item.kategori}`
@@ -134,10 +248,10 @@ function App() {
     0
   );
 
-  function tampilkanPesan(teks) {
+  const tampilkanPesan = useCallback((teks) => {
     setPesan(teks);
     window.setTimeout(() => setPesan(''), 3000);
-  }
+  }, []);
 
   function tambahKeKeranjang(item, jumlah = 1) {
     const stok = Number(item.stok) || 0;
@@ -218,6 +332,17 @@ function App() {
     setBarangDipilih(null);
   }
 
+    function bukaKategori(nama) {
+    const ditemukan = daftarKategori.find(
+      (kategori) =>
+        kategori.toLowerCase() === nama.toLowerCase()
+    );
+
+    setHalaman('katalog');
+    setKategoriAktif(ditemukan || 'Semua');
+    setBarangDipilih(null);
+  }
+
   async function buatPesanan() {
     if (keranjang.length === 0 || checkoutLoading) return;
 
@@ -248,6 +373,7 @@ function App() {
         throw new Error('Server tidak mengembalikan kode pesanan.');
       }
 
+      setWaktuSekarang(Date.now());
       setPesananAktif(data.pesanan);
       setKeranjang([]);
       setHalaman('pesanan');
@@ -262,7 +388,7 @@ function App() {
     }
   }
 
-  async function perbaruiStatusPesanan() {
+  const perbaruiStatusPesanan = useCallback(async () => {
     if (!pesananAktif?.kode_pesanan || memuatStatus) return;
 
     setMemuatStatus(true);
@@ -290,7 +416,12 @@ function App() {
     } finally {
       setMemuatStatus(false);
     }
-  }
+  }, [
+    ambilBarang,
+    memuatStatus,
+    pesananAktif?.kode_pesanan,
+    tampilkanPesan,
+  ]);
 
 
 async function loginAdmin(event) {
@@ -317,6 +448,7 @@ async function loginAdmin(event) {
     }
 
     setAdminToken(data.token);
+    setAdminView('dashboard');
     setAdminPassword('');
     await ambilPesananAdmin(data.token);
   } catch (err) {
@@ -407,6 +539,72 @@ async function tambahBarang(event) {
   }
 }
 
+async function handleUploadFoto(event) {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+
+  if (!file) return;
+
+  setFotoDiproses(true);
+  setTambahBarangError('');
+  setTambahBarangPesan('');
+
+  try {
+    const foto = await kompresFoto(file);
+    setFormBarang((sebelumnya) => ({ ...sebelumnya, foto }));
+    setTambahBarangPesan('Foto berhasil diproses.');
+  } catch (error) {
+    setTambahBarangError(error.message || 'Foto gagal diproses.');
+  } finally {
+    setFotoDiproses(false);
+    input.value = '';
+  }
+}
+
+function simpanKategoriBaru() {
+  const nama = kategoriBaruInput.trim();
+
+  if (!nama) {
+    setTambahBarangError('Nama kategori belum diisi.');
+    return;
+  }
+
+  const sudahAda = kategoriAdmin.find(
+    (kategori) => kategori.toLowerCase() === nama.toLowerCase()
+  );
+
+  if (sudahAda) {
+    setFormBarang((sebelumnya) => ({
+      ...sebelumnya,
+      kategori: sudahAda,
+    }));
+    setTambahKategoriTerbuka(false);
+    setKategoriBaruInput('');
+    setTambahBarangError('');
+    return;
+  }
+
+  const daftarBaru = [...kategoriTambahan, nama];
+  setKategoriTambahan(daftarBaru);
+
+  try {
+    localStorage.setItem(
+      'wny-kategori-tambahan',
+      JSON.stringify(daftarBaru)
+    );
+  } catch {
+    tampilkanPesan('Kategori hanya tersedia selama sesi ini.');
+  }
+
+  setFormBarang((sebelumnya) => ({
+    ...sebelumnya,
+    kategori: nama,
+  }));
+  setKategoriBaruInput('');
+  setTambahKategoriTerbuka(false);
+  setTambahBarangError('');
+}
+
 
 const mulaiEditBarang = (barang) => {
   setBarangEditId(barang.id);
@@ -475,6 +673,55 @@ const simpanEditBarang = async (event) => {
   }
 };
 
+async function hapusBarangAdmin(item) {
+  const yakin = window.confirm(
+    `Hapus barang "${item.nama}" dari katalog? Tindakan ini tidak bisa dibatalkan.`
+  );
+
+  if (!yakin) return;
+
+  setAdminLoading(true);
+  setAdminError('');
+
+  try {
+    const response = await fetch(`${API_BARANG}/${item.id}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || 'Gagal menghapus barang.');
+    }
+
+    setKeranjang((sebelumnya) =>
+      sebelumnya.filter((produk) => produk.id !== item.id)
+    );
+    await ambilBarang();
+
+    if (barangEditId === item.id) {
+      setBarangEditId(null);
+      setFormBarang({
+        nama: '',
+        kategori: '',
+        harga: '',
+        stok: '',
+        satuan: 'pcs',
+        foto: '',
+        deskripsi: '',
+      });
+    }
+
+    tampilkanPesan('Barang berhasil dihapus.');
+  } catch (error) {
+    setAdminError(error.message || 'Gagal menghapus barang.');
+  } finally {
+    setAdminLoading(false);
+  }
+}
+
 async function ubahStatusPesanan(pesanan, statusBaru) {
   const konfirmasi = {
     selesai: `Tandai pesanan ${pesanan.kode_pesanan} sebagai selesai?`,
@@ -515,12 +762,18 @@ async function ubahStatusPesanan(pesanan, statusBaru) {
 
 function logoutAdmin() {
   setAdminToken('');
+  setAdminView('dashboard');
   setAdminUsername('');
   setAdminPassword('');
   setAdminPesanan([]);
   setAdminError('');
   setHalaman('katalog');
 }
+
+  const statusMenunggu = [
+    'menunggu_pembayaran',
+    'menunggu_konfirmasi',
+  ].includes(pesananAktif?.status);
 
   // Periksa status secara berkala. Status final ditentukan backend.
   useEffect(() => {
@@ -544,85 +797,104 @@ function logoutAdmin() {
     halaman,
     pesananAktif?.kode_pesanan,
     pesananAktif?.status,
+    perbaruiStatusPesanan,
   ]);
 
   // Countdown hanya untuk pesanan yang masih menunggu.
   useEffect(() => {
-    if (halaman !== 'pesanan' || !pesananAktif) return;
-
-    const statusMenunggu = [
-      'menunggu_pembayaran',
-      'menunggu_konfirmasi',
-    ].includes(pesananAktif.status);
-
-    if (!statusMenunggu || !pesananAktif.batas_waktu) {
-      setDetikTersisa(0);
+    if (
+      halaman !== 'pesanan' ||
+      !statusMenunggu ||
+      !pesananAktif?.batas_waktu
+    ) {
       return;
     }
 
-    function hitungSisaWaktu() {
-      const sisa = Math.max(
-        0,
-        Math.ceil(
-          (new Date(pesananAktif.batas_waktu).getTime() - Date.now()) / 1000
-        )
-      );
-
-      setDetikTersisa(sisa);
-    }
-
-    hitungSisaWaktu();
-
-    const timer = window.setInterval(hitungSisaWaktu, 1000);
+    const timer = window.setInterval(() => {
+      setWaktuSekarang(Date.now());
+    }, 1000);
 
     return () => window.clearInterval(timer);
   }, [
     halaman,
-    pesananAktif?.kode_pesanan,
-    pesananAktif?.status,
     pesananAktif?.batas_waktu,
+    statusMenunggu,
   ]);
 
-  const statusMenunggu = [
-    'menunggu_pembayaran',
-    'menunggu_konfirmasi',
-  ].includes(pesananAktif?.status);
+  const detikTersisa =
+    statusMenunggu && pesananAktif?.batas_waktu
+      ? Math.max(
+          0,
+          Math.ceil(
+            (new Date(pesananAktif.batas_waktu).getTime() - waktuSekarang) /
+              1000
+          )
+        )
+      : 0;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
-      <header className="sticky top-0 z-30 bg-emerald-700 text-white shadow-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4 sm:px-6">
-          <button onClick={bukaKatalog} className="text-left">
-            <p className="text-xs text-emerald-100 sm:text-sm">
-              Selamat datang di
-            </p>
-            <h1 className="text-lg font-bold sm:text-2xl">
-              Warung Sembako Nenek Yoyoh
-            </h1>
-          </button>
-
+      <header
+        className={`store-topbar ${halaman === 'admin' ? 'admin-topbar' : ''}`}
+      >
           <button
-            onClick={bukaKeranjang}
-            className="relative flex shrink-0 items-center gap-2 rounded-xl bg-white/15 px-3 py-2 transition hover:bg-white/25 sm:px-4"
+            onClick={bukaKatalog}
+            className="store-brand"
+            aria-label="Kembali ke menu"
           >
-            <span aria-hidden="true">🛒</span>
-            <span className="hidden sm:inline">Keranjang</span>
-            <span className="rounded-full bg-white px-2 py-0.5 text-xs font-bold text-emerald-800">
-              {jumlahBarang}
+            <span className="store-brand-icon">🛍️</span>
+            <span className="store-brand-copy">
+              <strong>Warung</strong>
+              <span>Nenek Yoyoh</span>
             </span>
           </button>
 
-<button
-  onClick={() => {
-    setAdminError('');
-    setHalaman('admin');
-  }}
-  className="shrink-0 rounded-xl bg-white px-3 py-2 font-semibold text-emerald-800 transition hover:bg-emerald-50 sm:px-4"
->
-  Admin
-</button>
+          {halaman !== 'admin' && (
+            <label className="store-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                type="search"
+                value={pencarian}
+                onChange={(event) => setPencarian(event.target.value)}
+                placeholder="Mencari barang"
+                aria-label="Mencari barang"
+              />
+            </label>
+          )}
 
-        </div>
+          <div className="store-top-actions">
+            {halaman === 'admin' && adminToken ? (
+              <button
+                type="button"
+                className="top-logout-button"
+                onClick={logoutAdmin}
+              >
+                Keluar
+              </button>
+            ) : (
+              <button
+                className="top-icon-button"
+                onClick={() => {
+                  setAdminError('');
+                  setHalaman('admin');
+                }}
+                aria-label="Admin"
+                title="Admin"
+              >
+                ♙
+              </button>
+            )}
+
+            <button
+              className="top-icon-button cart-icon-button"
+              onClick={bukaKeranjang}
+              aria-label="Keranjang belanja"
+              title="Keranjang"
+            >
+              🛒
+              <span className="cart-badge">{jumlahBarang}</span>
+            </button>
+          </div>
       </header>
 
       {pesan && (
@@ -634,1125 +906,1343 @@ function logoutAdmin() {
         </div>
       )}
 
-      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
-
-
-{/* ================= ADMIN ================= */}
-{halaman === 'admin' && (
-  <section className="mx-auto max-w-5xl">
-    {!adminToken ? (
-      <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-        <button
-          onClick={bukaKatalog}
-          className="mb-6 font-semibold text-emerald-700"
-        >
-          ← Kembali ke katalog
-        </button>
-
-        <div className="mb-6 text-center">
-          <div className="text-5xl">🔐</div>
-          <h2 className="mt-4 text-2xl font-bold">Login Admin</h2>
-          <p className="mt-2 text-sm text-slate-500">
-            Warung Sembako Nenek Yoyoh
-          </p>
-        </div>
-
-        <form onSubmit={loginAdmin} className="space-y-4">
-          <div>
-            <label className="mb-2 block font-medium">
-              Username
-            </label>
-            <input
-              value={adminUsername}
-              onChange={(event) =>
-                setAdminUsername(event.target.value)
-              }
-              autoComplete="username"
-              required
-              className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-emerald-600"
-              placeholder="Masukkan username"
-            />
-          </div>
-
-          <div>
-            <label className="mb-2 block font-medium">
-              Password
-            </label>
-            <input
-              type="password"
-              value={adminPassword}
-              onChange={(event) =>
-                setAdminPassword(event.target.value)
-              }
-              autoComplete="current-password"
-              required
-              className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:border-emerald-600"
-              placeholder="Masukkan password"
-            />
-          </div>
-
-          {adminError && (
-            <p role="alert" className="text-sm text-red-600">
-              {adminError}
-            </p>
-          )}
-
-          <button
-            type="submit"
-            disabled={adminLoading}
-            className="w-full rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-          >
-            {adminLoading ? 'Memproses...' : 'Login'}
-          </button>
-        </form>
-      </div>
-    ) : (
-      <>
-        {/* HEADER ADMIN */}
-        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-          <div>
-            <p className="font-semibold text-emerald-700">
-              PANEL ADMIN
-            </p>
-            <h2 className="mt-1 text-3xl font-bold">
-              Daftar Pesanan
-            </h2>
-            <p className="mt-2 text-slate-500">
-              Kelola pesanan pelanggan warung.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => ambilPesananAdmin()}
-              disabled={adminLoading}
-              className="rounded-xl border border-emerald-700 px-4 py-2 font-semibold text-emerald-700 disabled:opacity-50"
-            >
-              {adminLoading ? 'Memuat...' : 'Refresh'}
-            </button>
-
-            <button
-              onClick={logoutAdmin}
-              className="rounded-xl bg-red-600 px-4 py-2 font-semibold text-white hover:bg-red-700"
-            >
-              Keluar
-            </button>
-          </div>
-        </div>
-
-        {adminError && (
-          <p
-            role="alert"
-            className="mt-5 rounded-xl bg-red-50 p-4 text-red-700"
-          >
-            {adminError}
-          </p>
+      <main
+        className={`store-layout ${
+          halaman === 'admin'
+            ? adminToken
+              ? 'admin-layout'
+              : 'login-layout'
+            : 'customer-layout'
+        }`}
+      >
+        {halaman === 'admin' && adminToken && (
+          <aside className="store-sidebar">
+            <nav className="sidebar-nav">
+              <button
+                className={`side-link ${adminView === 'dashboard' ? 'active' : ''}`}
+                onClick={() => setAdminView('dashboard')}
+              >
+                <span className="side-icon">▦</span>
+                <span>Panel Admin</span>
+              </button>
+              <button
+                className={`side-link ${adminView === 'barang' ? 'active' : ''}`}
+                onClick={() => setAdminView('barang')}
+              >
+                <span className="side-icon">📦</span>
+                <span>Kelola Barang</span>
+              </button>
+              <button
+                className={`side-link ${adminView === 'tambah' ? 'active' : ''}`}
+                onClick={() => setAdminView('tambah')}
+              >
+                <span className="side-icon">＋</span>
+                <span>Tambah Barang</span>
+              </button>
+              <button
+                className={`side-link ${adminView === 'pesanan' ? 'active' : ''}`}
+                onClick={() => setAdminView('pesanan')}
+              >
+                <span className="side-icon">🧾</span>
+                <span>Daftar Pesanan</span>
+              </button>
+            </nav>
+          </aside>
         )}
 
-        {/* STATISTIK */}
-        <div className="mt-6 grid gap-4 sm:grid-cols-3">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <p className="text-sm text-slate-500">Total Pesanan</p>
-            <p className="mt-2 text-3xl font-bold">
-              {adminPesanan.length}
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <p className="text-sm text-slate-500">
-              Menunggu Pembayaran
-            </p>
-            <p className="mt-2 text-3xl font-bold text-amber-600">
-              {adminPesanan.filter(
-                (p) => p.status === 'menunggu_pembayaran'
-              ).length}
-            </p>
-          </div>
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-5">
-            <p className="text-sm text-slate-500">
-              Menunggu Konfirmasi COD
-            </p>
-            <p className="mt-2 text-3xl font-bold text-blue-600">
-              {adminPesanan.filter(
-                (p) => p.status === 'menunggu_konfirmasi'
-              ).length}
-            </p>
-          </div>     
-      </div>
-      
-{/* DAFTAR BARANG ADMIN */}
-<div className="mt-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-    <div>
-      <h3 className="text-xl font-bold">Kelola Barang</h3>
-      <p className="mt-1 text-sm text-slate-500">
-        Pilih barang untuk mengubah informasi produk.
-      </p>
-    </div>
-
-    <button
-      type="button"
-      onClick={() => {
-        setBarangEditId(null);
-        setFormBarang({
-          nama: '',
-          kategori: '',
-          harga: '',
-          stok: '',
-          satuan: 'pcs',
-          foto: '',
-          deskripsi: '',
-        });
-        setTambahBarangError('');
-        setTambahBarangPesan('');
-      }}
-      className="w-full rounded-xl bg-emerald-700 px-4 py-2 font-semibold text-white hover:bg-emerald-800 sm:w-auto"
-    >
-      + Barang Baru
-    </button>
-  </div>
-
-  <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-    {barang.length === 0 ? (
-      <p className="rounded-xl bg-slate-50 p-4 text-slate-500 md:col-span-2 xl:col-span-3">
-        Belum ada barang di katalog.
-      </p>
-    ) : (
-      barang.map((item) => (
-        <div
-          key={item.id}
-          className="flex min-w-0 items-center justify-between gap-3 rounded-xl border border-slate-200 p-3 transition hover:border-emerald-300 hover:bg-emerald-50/30"
-        >
-          <div className="flex min-w-0 items-center gap-3">
-            {item.foto ? (
-              <img
-                src={item.foto}
-                alt={item.nama}
-                className="h-14 w-14 shrink-0 rounded-lg object-cover"
-              />
-            ) : (
-              <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-2xl">
-                🛒
-              </div>
-            )}
-
-            <div className="min-w-0">
-              <p className="truncate font-semibold text-slate-800">
-                {item.nama}
-              </p>
-              <p className="truncate text-sm text-slate-500">
-                {item.kategori}
-              </p>
-              <p className="text-xs text-slate-500">
-                Stok: {item.stok} {item.satuan}
-              </p>
-              <p className="mt-1 text-sm font-semibold text-emerald-700">
-                {formatRupiah(item.harga)}
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => mulaiEditBarang(item)}
-            className="shrink-0 rounded-lg border border-emerald-700 px-3 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-700 hover:text-white"
-          >
-            Edit
-          </button>
-        </div>
-      ))
-    )}
-  </div>
-</div>
-        
-{/* FORM TAMBAH BARANG */}
-<div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-  <h3 className="text-xl font-bold">
-  {barangEditId ? 'Edit Barang' : 'Tambah Barang'}
-</h3>
-  <p className="mt-1 text-sm text-slate-500">
-  {barangEditId
-    ? 'Ubah informasi barang yang dipilih.'
-    : 'Tambahkan produk baru ke katalog warung.'}
-</p>
-
-  <form
-  onSubmit={barangEditId ? simpanEditBarang : tambahBarang}
-  className="mt-5 space-y-4"
->
-    <div className="grid gap-4 sm:grid-cols-2">
-      <div>
-        <label className="mb-2 block font-medium">Nama Barang</label>
-        <input
-          value={formBarang.nama}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, nama: e.target.value })
-          }
-          required
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-          placeholder="Contoh: Gula Pasir"
-        />
-      </div>
-
-      <div>
-        <label className="mb-2 block font-medium">Kategori</label>
-        <input
-          value={formBarang.kategori}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, kategori: e.target.value })
-          }
-          required
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-          placeholder="Contoh: Sembako"
-        />
-      </div>
-
-      <div>
-        <label className="mb-2 block font-medium">Harga (Rp)</label>
-        <input
-          type="number"
-          min="1"
-          step="1"
-          value={formBarang.harga}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, harga: e.target.value })
-          }
-          required
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-          placeholder="Contoh: 15000"
-        />
-      </div>
-
-      <div>
-        <label className="mb-2 block font-medium">Stok</label>
-        <input
-          type="number"
-          min="0"
-          step="1"
-          value={formBarang.stok}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, stok: e.target.value })
-          }
-          required
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-          placeholder="Contoh: 20"
-        />
-      </div>
-
-      <div>
-        <label className="mb-2 block font-medium">Satuan</label>
-        <select
-          value={formBarang.satuan}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, satuan: e.target.value })
-          }
-          required
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-        >
-          <option value="pcs">pcs</option>
-          <option value="kg">kg</option>
-          <option value="liter">liter</option>
-          <option value="bungkus">bungkus</option>
-          <option value="pack">pack</option>
-          <option value="botol">botol</option>
-        </select>
-      </div>
-
-      <div>
-        <label className="mb-2 block font-medium">URL Foto (opsional)</label>
-        <input
-          type="url"
-          value={formBarang.foto}
-          onChange={(e) =>
-            setFormBarang({ ...formBarang, foto: e.target.value })
-          }
-          className="w-full rounded-xl border border-slate-300 px-4 py-3"
-          placeholder="https://..."
-        />
-      </div>
-    </div>
-
-    <div>
-      <label className="mb-2 block font-medium">Deskripsi (opsional)</label>
-      <textarea
-        value={formBarang.deskripsi}
-        onChange={(e) =>
-          setFormBarang({ ...formBarang, deskripsi: e.target.value })
-        }
-        rows={3}
-        className="w-full rounded-xl border border-slate-300 px-4 py-3"
-        placeholder="Keterangan barang..."
-      />
-    </div>
-
-    {tambahBarangError && (
-      <p role="alert" className="rounded-xl bg-red-50 p-3 text-red-700">
-        {tambahBarangError}
-      </p>
-    )}
-
-    {tambahBarangPesan && (
-      <p role="status" className="rounded-xl bg-emerald-50 p-3 text-emerald-700">
-        {tambahBarangPesan}
-      </p>
-    )}
-
-    <div className="flex flex-wrap gap-3">
-  <button
-    type="submit"
-    disabled={tambahBarangLoading}
-    className="rounded-xl bg-emerald-700 px-5 py-3 font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-  >
-    {tambahBarangLoading
-      ? 'Menyimpan...'
-      : barangEditId
-        ? 'Simpan Perubahan'
-        : 'Tambah Barang'}
-  </button>
-
-  {barangEditId && (
-    <button
-      type="button"
-      onClick={() => {
-        setBarangEditId(null);
-        setFormBarang({
-          nama: '',
-          kategori: '',
-          harga: '',
-          stok: '',
-          satuan: 'pcs',
-          foto: '',
-          deskripsi: '',
-        });
-        setTambahBarangError('');
-        setTambahBarangPesan('');
-      }}
-      className="rounded-xl border border-slate-300 px-5 py-3 font-semibold text-slate-700 hover:bg-slate-100"
-    >
-      Batal Edit
-    </button>
-  )}
-</div>
-  </form>
-</div>
-
-
-        {/* DAFTAR PESANAN */}
-        <div className="mt-6 space-y-4">
-          {adminPesanan.length === 0 && !adminLoading ? (
-            <div className="rounded-2xl bg-white p-8 text-center text-slate-500">
-              Belum ada pesanan.
-            </div>
-          ) : (
-            adminPesanan.map((pesanan) => (
-              <article
-                key={pesanan.id}
-                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-              >
-                {/* INFORMASI PESANAN */}
-                <div className="flex flex-col justify-between gap-3 sm:flex-row">
-                  <div>
-                    <p className="break-all font-bold text-emerald-700">
-                      {pesanan.kode_pesanan}
-                    </p>
-
-                    <p className="mt-1 text-sm text-slate-500">
-                      {pesanan.metode_pembayaran} ·{' '}
-                      {new Date(
-                        pesanan.dibuat_pada
-                      ).toLocaleString('id-ID')}
-                    </p>
+        <div className="store-content">
+          {/* ================= KATALOG PELANGGAN ================= */}
+          {halaman === 'katalog' && (
+            <section className="customer-catalog">
+              <div className="customer-hero">
+                <div className="customer-hero-copy">
+                  <span className="customer-hero-kicker">
+                    WARUNG NENEK YOYOH
+                  </span>
+                  <h1>
+                    Belanja harian,
+                    <br />
+                    jadi lebih mudah.
+                  </h1>
+                  <p>
+                    Temukan kebutuhan rumah tangga, cek harga dan stok,
+                    lalu tambahkan barang ke keranjang dengan mudah.
+                  </p>
+                  <button
+                    type="button"
+                    className="customer-hero-button"
+                    onClick={() =>
+                      document
+                        .getElementById('customer-products')
+                        ?.scrollIntoView({ behavior: 'smooth' })
+                    }
+                  >
+                    Mulai Belanja <span aria-hidden="true">↓</span>
+                  </button>
+                  <div className="customer-hero-benefits">
+                    <span>✓ Harga terlihat jelas</span>
+                    <span>✓ Informasi stok tersedia</span>
                   </div>
+                </div>
 
-                  <span className="h-fit rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold">
-                    {labelStatus(pesanan.status)}
+                <div className="customer-hero-art" aria-hidden="true">
+                  <div className="customer-hero-circle" />
+                  <div className="customer-hero-bag">🛍️</div>
+                  <span className="customer-hero-float float-one">🌾</span>
+                  <span className="customer-hero-float float-two">🍜</span>
+                  <span className="customer-hero-float float-three">🫒</span>
+                </div>
+              </div>
+
+              <div className="customer-category-section">
+                <div className="customer-section-heading">
+                  <div>
+                    <h2>Mau belanja apa?</h2>
+                    <p>Pilih kategori untuk menemukan barang yang kamu cari.</p>
+                  </div>
+                </div>
+
+                <div className="customer-category-list">
+                  {daftarKategori.map((kategori) => {
+                    const nama = kategori.toLowerCase();
+                    const ikon =
+                      nama === 'semua'
+                        ? '▦'
+                        : nama.includes('beras')
+                          ? '🌾'
+                          : nama.includes('minyak')
+                            ? '🫒'
+                            : nama.includes('mie')
+                              ? '🍜'
+                              : nama.includes('sembako')
+                                ? '🧺'
+                                : '🛍️';
+
+                    return (
+                      <button
+                        key={kategori}
+                        type="button"
+                        onClick={() => bukaKategori(kategori)}
+                        className={`customer-category-chip ${
+                          kategoriAktif === kategori ? 'selected' : ''
+                        }`}
+                        aria-pressed={kategoriAktif === kategori}
+                      >
+                        <span className="customer-category-icon" aria-hidden="true">
+                          {ikon}
+                        </span>
+                        <span>{kategori}</span>
+                        {kategoriAktif === kategori && (
+                          <span className="customer-category-check">✓</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div
+                id="customer-products"
+                className="customer-products-section"
+              >
+                <div className="customer-section-heading products-heading">
+                  <div>
+                    <h2>Produk pilihan</h2>
+                    <p>Pilih barang yang kamu butuhkan hari ini.</p>
+                  </div>
+                  <span className="customer-product-count">
+                    {hasilPencarian.length} produk
                   </span>
                 </div>
 
-                {/* RINCIAN BARANG */}
-                <div className="mt-4 border-t border-slate-100 pt-4">
-                  <p className="text-sm text-slate-500">Barang</p>
-
-                  <ul className="mt-2 space-y-1">
-                    {(pesanan.items || []).map((item, index) => (
-                      <li
-                        key={`${item.barang_id}-${index}`}
-                        className="flex justify-between gap-3 text-sm"
-                      >
-                        <span>
-                          {item.nama_barang} × {item.jumlah}
-                        </span>
-
-                        <span className="shrink-0">
-                          {formatRupiah(item.subtotal)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* TOTAL DAN TOMBOL AKSI */}
-                <div className="mt-4 flex flex-col justify-between gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center">
-                  <div>
-                    <p className="text-sm text-slate-500">Total</p>
-                    <p className="text-xl font-bold">
-                      {formatRupiah(pesanan.total)}
-                    </p>
+                {loading ? (
+                  <div className="customer-state-message">
+                    <span className="customer-loading-icon">🛍️</span>
+                    <p>Sedang memuat produk...</p>
                   </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {/* KONFIRMASI COD */}
-                    {pesanan.status === 'menunggu_konfirmasi' &&
-                      pesanan.metode_pembayaran === 'COD' && (
-                        <button
-                          onClick={async () => {
-                            const yakin = window.confirm(
-                              'Pastikan uang tunai sudah benar-benar diterima. Konfirmasi pesanan ini?'
-                            );
-
-                            if (!yakin) return;
-
-                            setAdminLoading(true);
-                            setAdminError('');
-
-                            try {
-                              const response = await fetch(
-                                `${API_PESANAN}/${encodeURIComponent(
-                                  pesanan.kode_pesanan
-                                )}/konfirmasi-cod`,
-                                {
-                                  method: 'POST',
-                                  headers: {
-                                    Authorization: `Bearer ${adminToken}`,
-                                  },
-                                }
-                              );
-
-                              const data = await response.json();
-
-                              if (!response.ok) {
-                                throw new Error(
-                                  data.message ||
-                                    'Konfirmasi COD gagal.'
-                                );
-                              }
-
-                              await ambilPesananAdmin();
-                              tampilkanPesan(
-                                'Pesanan COD berhasil dikonfirmasi.'
-                              );
-                            } catch (err) {
-                              setAdminError(
-                                err.message || 'Konfirmasi COD gagal.'
-                              );
-                            } finally {
-                              setAdminLoading(false);
-                            }
-                          }}
-                          disabled={adminLoading}
-                          className="rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-                        >
-                          Uang Diterima · Proses Pesanan
-                        </button>
-                      )}
-
-                    {/* SELESAIKAN PESANAN */}
-                    {pesanan.status === 'diproses' && (
-                      <button
-                        onClick={() =>
-                          ubahStatusPesanan(pesanan, 'selesai')
-                        }
-                        disabled={adminLoading}
-                        className="rounded-xl bg-blue-700 px-4 py-3 font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
-                      >
-                        Selesaikan Pesanan
-                      </button>
-                    )}
-
-                    {/* BATALKAN PESANAN */}
-                    {[
-                      'menunggu_pembayaran',
-                      'menunggu_konfirmasi',
-                    ].includes(pesanan.status) && (
-                      <button
-                        onClick={() =>
-                          ubahStatusPesanan(pesanan, 'dibatalkan')
-                        }
-                        disabled={adminLoading}
-                        className="rounded-xl border border-red-300 px-4 py-3 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
-                      >
-                        Batalkan Pesanan
-                      </button>
-                    )}
+                ) : error ? (
+                  <div className="customer-state-message customer-error">
+                    <p>{error}</p>
+                    <button type="button" onClick={ambilBarang}>
+                      Coba lagi
+                    </button>
                   </div>
-                </div>
-              </article>
-            ))
-          )}
-        </div>
-      </>
-    )}
-  </section>
-)}
-
-
-        {/* ================= KATALOG ================= */}
-        {halaman === 'katalog' && (
-          <>
-            <section className="mb-8 rounded-3xl bg-emerald-50 px-6 py-8 sm:px-10 sm:py-12">
-              <p className="mb-2 font-semibold text-emerald-700">
-                Kebutuhan sehari-hari, lebih mudah dicari
-              </p>
-              <h2 className="max-w-2xl text-3xl font-bold leading-tight sm:text-4xl">
-                Cari sembako sebelum datang
-              </h2>
-              <p className="mt-3 max-w-2xl text-slate-600">
-                Lihat harga dan ketersediaan barang di Warung Sembako Nenek
-                Yoyoh.
-              </p>
-              <button
-                onClick={() =>
-                  document.getElementById('daftar-barang')?.scrollIntoView({
-                    behavior: 'smooth',
-                  })
-                }
-                className="mt-6 rounded-xl bg-emerald-700 px-5 py-3 font-semibold text-white transition hover:bg-emerald-800"
-              >
-                Lihat Barang
-              </button>
-            </section>
-
-            <section id="daftar-barang">
-              <div className="mb-5">
-                <label
-                  htmlFor="cari-barang"
-                  className="mb-2 block font-medium"
-                >
-                  Cari nama atau kategori barang
-                </label>
-                <input
-                  id="cari-barang"
-                  type="search"
-                  value={pencarian}
-                  onChange={(event) => setPencarian(event.target.value)}
-                  placeholder="Contoh: beras, minyak, gula..."
-                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
-                />
-              </div>
-
-              <div className="mb-6 flex flex-wrap gap-2">
-                {daftarKategori.map((kategori) => (
-                  <button
-                    key={kategori}
-                    onClick={() => setKategoriAktif(kategori)}
-                    className={`rounded-full px-4 py-2 text-sm font-medium transition ${
-                      kategoriAktif === kategori
-                        ? 'bg-emerald-700 text-white'
-                        : 'border border-slate-200 bg-white text-slate-600 hover:border-emerald-500 hover:text-emerald-700'
-                    }`}
-                  >
-                    {kategori}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mb-5 flex items-center justify-between gap-3">
-                <h3 className="text-xl font-bold">Daftar Barang</h3>
-                <span className="text-sm text-slate-500">
-                  {hasilPencarian.length} barang
-                </span>
-              </div>
-
-              {loading ? (
-                <p className="py-10 text-center text-slate-500">
-                  Memuat data barang...
-                </p>
-              ) : error ? (
-                <div className="rounded-xl bg-red-50 p-5 text-red-700">
-                  <p>{error}</p>
-                  <button
-                    onClick={ambilBarang}
-                    className="mt-3 font-semibold underline"
-                  >
-                    Coba lagi
-                  </button>
-                </div>
-              ) : hasilPencarian.length === 0 ? (
-                <p className="rounded-xl bg-white p-8 text-center text-slate-500 shadow-sm">
-                  Barang tidak ditemukan.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-                  {hasilPencarian.map((item) => (
-                    <article
-                      key={item.id}
-                      className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-md"
+                ) : hasilPencarian.length === 0 ? (
+                  <div className="customer-state-message">
+                    <span className="customer-loading-icon">🔎</span>
+                    <h3>Barang belum ditemukan</h3>
+                    <p>Coba kata pencarian atau kategori lainnya.</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPencarian('');
+                        setKategoriAktif('Semua');
+                      }}
                     >
-                      <button
-                        onClick={() => setBarangDipilih(item)}
-                        className="flex h-40 items-center justify-center overflow-hidden bg-emerald-50 text-6xl"
-                        aria-label={`Lihat detail ${item.nama}`}
-                      >
-                        {item.foto ? (
-                          <img
-                            src={item.foto}
-                            alt={item.nama}
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <span aria-hidden="true">🛒</span>
-                        )}
-                      </button>
+                      Lihat semua produk
+                    </button>
+                  </div>
+                ) : (
+                  <div className="customer-products-grid">
+                    {hasilPencarian.map((item) => {
+                      const stokTersedia = Number(item.stok) > 0;
+                      const namaKategori = (item.kategori || '').toLowerCase();
+                      const ikonProduk = namaKategori.includes('beras')
+                        ? '🌾'
+                        : namaKategori.includes('minyak')
+                          ? '🫒'
+                          : namaKategori.includes('mie')
+                            ? '🍜'
+                            : namaKategori.includes('sembako')
+                              ? '🧺'
+                              : '🛍️';
 
-                      <div className="flex flex-1 flex-col p-5">
-                        <div>
-                          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                            {item.kategori}
-                          </span>
+                      return (
+                        <article
+                          key={item.id}
+                          className="customer-product-card"
+                        >
                           <button
+                            type="button"
+                            className="customer-product-visual"
                             onClick={() => setBarangDipilih(item)}
-                            className="mt-3 block text-left text-lg font-bold hover:text-emerald-700"
+                            aria-label={`Lihat detail ${item.nama}`}
                           >
-                            {item.nama}
-                          </button>
-                          <p className="mt-2 text-xl font-bold text-emerald-700">
-                            {formatRupiah(item.harga)}
-                            <span className="ml-1 text-sm font-normal text-slate-500">
-                              / {item.satuan}
+                            {item.foto ? (
+                              <img
+                                src={item.foto}
+                                alt={item.nama}
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="customer-product-placeholder">
+                                <span>{ikonProduk}</span>
+                                <small>
+                                  {item.kategori || 'Produk pilihan'}
+                                </small>
+                              </div>
+                            )}
+                            <span
+                              className={`customer-stock-badge ${
+                                stokTersedia ? 'in-stock' : 'out-stock'
+                              }`}
+                            >
+                              {stokTersedia ? 'Tersedia' : 'Stok habis'}
                             </span>
-                          </p>
-                          <p
-                            className={`mt-3 text-sm ${
-                              Number(item.stok) > 0
-                                ? 'text-emerald-700'
-                                : 'text-red-600'
-                            }`}
-                          >
-                            {Number(item.stok) > 0
-                              ? `Stok tersedia: ${item.stok} ${item.satuan}`
-                              : 'Stok habis'}
-                          </p>
-                        </div>
+                          </button>
 
-                        <div className="mt-5 grid grid-cols-2 gap-2">
-                          <button
-                            onClick={() => setBarangDipilih(item)}
-                            className="rounded-xl border border-emerald-700 px-3 py-2.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50"
-                          >
-                            Detail
-                          </button>
-                          <button
-                            onClick={() => tambahKeKeranjang(item)}
-                            disabled={Number(item.stok) <= 0}
-                            className="rounded-xl bg-emerald-700 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                          >
-                            + Keranjang
-                          </button>
-                        </div>
+                          <div className="customer-product-body">
+                            <span className="customer-product-category">
+                              {item.kategori || 'Lainnya'}
+                            </span>
+                            <button
+                              type="button"
+                              className="customer-product-name"
+                              onClick={() => setBarangDipilih(item)}
+                              title={item.nama}
+                            >
+                              {item.nama}
+                            </button>
+                            <div className="customer-product-price">
+                              <strong>{formatRupiah(item.harga)}</strong>
+                              <span>/ {item.satuan}</span>
+                            </div>
+                            <div className="customer-product-footer">
+                              <span className="customer-stock-text">
+                                Stok: {item.stok} {item.satuan}
+                              </span>
+                              <button
+                                type="button"
+                                className="customer-add-button"
+                                onClick={() => tambahKeKeranjang(item)}
+                                disabled={!stokTersedia}
+                                aria-label={`Tambah ${item.nama} ke keranjang`}
+                              >
+                                <span aria-hidden="true">+</span>
+                                <span>Tambah</span>
+                              </button>
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {halaman === 'keranjang' && (
+            <section className="customer-cart-page">
+              <div className="customer-cart-heading">
+                <div className="customer-cart-title-row">
+                  <div>
+                    <h1>Keranjang Belanja</h1>
+                    <p>Periksa barang pilihanmu sebelum melanjutkan.</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="customer-back-button"
+                    onClick={bukaKatalog}
+                  >
+                    <span aria-hidden="true">←</span>
+                    Kembali Belanja
+                  </button>
+                </div>
+              </div>
+
+              {keranjang.length === 0 ? (
+                <div className="customer-cart-empty">
+                  <div className="customer-cart-empty-icon" aria-hidden="true">
+                    🛍️
+                  </div>
+                  <h2>Keranjangmu masih kosong</h2>
+                  <p>
+                    Belum ada barang yang dipilih. Yuk, cari kebutuhan
+                    sehari-hari yang kamu perlukan.
+                  </p>
+                  <button
+                    type="button"
+                    className="customer-cart-primary"
+                    onClick={bukaKatalog}
+                  >
+                    Mulai Belanja
+                  </button>
+                </div>
+              ) : (
+                <div className="customer-cart-layout">
+                  <div className="customer-cart-main">
+                    <div className="customer-cart-list-heading">
+                      <div>
+                        <h2>Barang Pilihan</h2>
+                        <p>{jumlahBarang} barang dalam keranjang</p>
                       </div>
-                    </article>
-                  ))}
+                      <span className="customer-cart-count">
+                        {keranjang.length} produk
+                      </span>
+                    </div>
+
+                    <div className="customer-cart-list">
+                      {keranjang.map((item) => (
+                        <article
+                          key={item.id}
+                          className="customer-cart-item"
+                        >
+                          <div className="customer-cart-item-image">
+                            {item.foto ? (
+                              <img src={item.foto} alt={item.nama} />
+                            ) : (
+                              <span aria-hidden="true">
+                                {item.kategori?.toLowerCase().includes('beras')
+                                  ? '🌾'
+                                  : item.kategori?.toLowerCase().includes('minyak')
+                                    ? '🫒'
+                                    : item.kategori?.toLowerCase().includes('mie')
+                                      ? '🍜'
+                                      : '🛍️'}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="customer-cart-item-info">
+                            <span className="customer-cart-item-category">
+                              {item.kategori || 'Produk pilihan'}
+                            </span>
+                            <h3>{item.nama}</h3>
+                            <p className="customer-cart-unit-price">
+                              {formatRupiah(item.harga)} / {item.satuan}
+                            </p>
+                            <strong className="customer-cart-line-total">
+                              {formatRupiah(item.harga * item.jumlah)}
+                            </strong>
+                          </div>
+
+                          <div className="customer-cart-item-actions">
+                            <div className="customer-quantity-control">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  item.jumlah === 1
+                                    ? hapusDariKeranjang(item.id)
+                                    : ubahJumlah(item.id, item.jumlah - 1)
+                                }
+                                aria-label={`Kurangi jumlah ${item.nama}`}
+                              >
+                                −
+                              </button>
+                              <span>{item.jumlah}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  ubahJumlah(item.id, item.jumlah + 1)
+                                }
+                                disabled={item.jumlah >= item.stok}
+                                aria-label={`Tambah jumlah ${item.nama}`}
+                              >
+                                +
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              className="customer-cart-remove"
+                              onClick={() => hapusDariKeranjang(item.id)}
+                              aria-label={`Hapus ${item.nama} dari keranjang`}
+                            >
+                              <span aria-hidden="true">×</span>
+                              Hapus
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+
+                  </div>
+
+                  <aside className="customer-cart-summary">
+                    <div className="customer-cart-summary-heading">
+                      <div>
+                        <h2>Ringkasan Belanja</h2>
+                        <p>Rincian total belanja kamu</p>
+                      </div>
+                      <span aria-hidden="true">▤</span>
+                    </div>
+
+                    <div className="customer-cart-summary-row">
+                      <span>Jumlah barang</span>
+                      <strong>{jumlahBarang} item</strong>
+                    </div>
+                    <div className="customer-cart-summary-row">
+                      <span>Jenis produk</span>
+                      <strong>{keranjang.length} produk</strong>
+                    </div>
+                    <div className="customer-cart-summary-divider" />
+
+                    <div className="customer-cart-grand-total">
+                      <span>Total belanja</span>
+                      <strong>{formatRupiah(totalBelanja)}</strong>
+                    </div>
+                    <p className="customer-cart-summary-note">
+                      Harga dan stok akan diperiksa kembali saat pesanan
+                      dibuat.
+                    </p>
+                    <button
+                      type="button"
+                      className="customer-cart-primary"
+                      onClick={() => setHalaman('checkout')}
+                    >
+                      Lanjutkan Checkout
+                      <span aria-hidden="true">→</span>
+                    </button>
+                    <div className="customer-cart-safe-note">
+                      <span aria-hidden="true">✓</span>
+                      Periksa pesanan sebelum melakukan pembayaran
+                    </div>
+                  </aside>
                 </div>
               )}
             </section>
-          </>
-        )}
+          )}
 
-        {/* ================= KERANJANG ================= */}
-        {halaman === 'keranjang' && (
-          <section>
-            <button
-              onClick={bukaKatalog}
-              className="mb-6 font-semibold text-emerald-700 hover:text-emerald-900"
-            >
-              ← Kembali ke katalog
-            </button>
-
-            <h2 className="text-3xl font-bold">Keranjang Belanja</h2>
-            <p className="mt-2 text-slate-500">
-              Periksa barang dan jumlah belanjaanmu.
-            </p>
-
-            {keranjang.length === 0 ? (
-              <div className="mt-8 rounded-2xl bg-white p-10 text-center shadow-sm">
-                <div className="text-5xl" aria-hidden="true">
-                  🛒
-                </div>
-                <h3 className="mt-4 text-xl font-bold">
-                  Keranjang masih kosong
-                </h3>
-                <p className="mt-2 text-slate-500">
-                  Yuk, pilih barang yang kamu butuhkan.
-                </p>
-                <button
-                  onClick={bukaKatalog}
-                  className="mt-5 rounded-xl bg-emerald-700 px-5 py-3 font-semibold text-white hover:bg-emerald-800"
-                >
-                  Mulai Belanja
-                </button>
-              </div>
-            ) : (
-              <div className="mt-7 grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
-                <div className="space-y-4 lg:col-span-2">
-                  {keranjang.map((item) => (
-                    <article
-                      key={item.id}
-                      className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-center"
-                    >
-                      <div className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-emerald-50 text-3xl">
-                        {item.foto ? (
-                          <img
-                            src={item.foto}
-                            alt={item.nama}
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          '🛒'
-                        )}
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold text-emerald-700">
-                          {item.kategori}
-                        </p>
-                        <h3 className="mt-1 font-bold">{item.nama}</h3>
-                        <p className="mt-1 text-sm text-slate-500">
-                          {formatRupiah(item.harga)} / {item.satuan}
-                        </p>
-                        <p className="mt-2 font-semibold text-emerald-700">
-                          {formatRupiah(item.harga * item.jumlah)}
-                        </p>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-4 sm:flex-col sm:items-end">
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={() =>
-                              item.jumlah === 1
-                                ? hapusDariKeranjang(item.id)
-                                : ubahJumlah(item.id, item.jumlah - 1)
-                            }
-                            className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 font-bold hover:bg-slate-50"
-                            aria-label={`Kurangi ${item.nama}`}
-                          >
-                            −
-                          </button>
-                          <span className="min-w-5 text-center font-semibold">
-                            {item.jumlah}
-                          </span>
-                          <button
-                            onClick={() =>
-                              ubahJumlah(item.id, item.jumlah + 1)
-                            }
-                            disabled={item.jumlah >= item.stok}
-                            className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 font-bold hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
-                            aria-label={`Tambah ${item.nama}`}
-                          >
-                            +
-                          </button>
-                        </div>
-
-                        <button
-                          onClick={() => hapusDariKeranjang(item.id)}
-                          className="text-sm font-medium text-red-600 hover:text-red-800"
-                        >
-                          Hapus
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-
-                <aside className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-28">
-                  <h3 className="text-lg font-bold">Ringkasan Belanja</h3>
-                  <div className="mt-5 flex justify-between gap-3 text-sm text-slate-600">
-                    <span>Jumlah barang</span>
-                    <span>{jumlahBarang} item</span>
-                  </div>
-                  <div className="mt-3 flex justify-between gap-3 text-sm text-slate-600">
-                    <span>Subtotal</span>
-                    <span>{formatRupiah(totalBelanja)}</span>
-                  </div>
-                  <div className="my-5 border-t border-slate-200" />
-                  <div className="flex items-start justify-between gap-3">
-                    <span className="font-semibold">Total</span>
-                    <span className="text-right text-xl font-bold text-emerald-700">
-                      {formatRupiah(totalBelanja)}
-                    </span>
-                  </div>
-                  <p className="mt-4 text-xs leading-relaxed text-slate-500">
-                    Harga dan ketersediaan stok akan diperiksa kembali saat
-                    pesanan dibuat.
+          {halaman === 'checkout' && (
+            <section className="customer-checkout-page">
+              <header className="customer-checkout-heading">
+                <div>
+                  <span className="customer-checkout-eyebrow">
+                    LANGKAH TERAKHIR
+                  </span>
+                  <h1>Checkout</h1>
+                  <p>
+                    Periksa pesanan dan pilih metode pembayaran sebelum
+                    membuat pesanan.
                   </p>
+                </div>
+                <button
+                  type="button"
+                  className="customer-page-back"
+                  onClick={bukaKeranjang}
+                >
+                  <span aria-hidden="true">←</span>
+                  Kembali ke Keranjang
+                </button>
+              </header>
+
+              {keranjang.length === 0 ? (
+                <div className="customer-checkout-empty">
+                  <span aria-hidden="true">🛒</span>
+                  <h2>Keranjang masih kosong</h2>
+                  <p>Tambahkan barang terlebih dahulu sebelum checkout.</p>
                   <button
-                    onClick={() => setHalaman('checkout')}
-                    className="mt-6 w-full rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white transition hover:bg-emerald-800"
-                  >
-                    Lanjutkan Checkout
-                  </button>
-                  <button
+                    type="button"
+                    className="customer-checkout-primary"
                     onClick={bukaKatalog}
-                    className="mt-3 w-full rounded-xl border border-slate-300 px-4 py-3 font-semibold text-slate-700 transition hover:bg-slate-50"
                   >
-                    Tambah Barang
+                    Mulai Belanja
                   </button>
-                </aside>
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ================= CHECKOUT ================= */}
-        {halaman === 'checkout' && (
-          <section className="mx-auto max-w-3xl">
-            <button
-              onClick={bukaKeranjang}
-              className="mb-6 font-semibold text-emerald-700 hover:text-emerald-900"
-            >
-              ← Kembali ke keranjang
-            </button>
-
-            <h2 className="text-3xl font-bold">Checkout</h2>
-            <p className="mt-2 text-slate-500">
-              Pilih metode pembayaran untuk membuat pesanan.
-            </p>
-
-            {keranjang.length === 0 ? (
-              <div className="mt-6 rounded-2xl bg-white p-8 text-center shadow-sm">
-                <p>Keranjang kosong. Tambahkan barang sebelum checkout.</p>
-                <button
-                  onClick={bukaKatalog}
-                  className="mt-4 rounded-xl bg-emerald-700 px-5 py-3 font-semibold text-white"
-                >
-                  Kembali ke katalog
-                </button>
-              </div>
-            ) : (
-              <div className="mt-7 grid gap-6 md:grid-cols-5">
-                <div className="space-y-4 md:col-span-3">
-                  <div className="rounded-2xl border border-slate-200 bg-white p-5">
-                    <h3 className="text-lg font-bold">Metode Pembayaran</h3>
-
-                    <label className="mt-4 flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500">
-                      <input
-                        type="radio"
-                        name="metode"
-                        value="QRIS"
-                        checked={metodePembayaran === 'QRIS'}
-                        onChange={() => setMetodePembayaran('QRIS')}
-                        className="mt-1 accent-emerald-700"
-                      />
-                      <span>
-                        <span className="block font-semibold">QRIS</span>
-                        <span className="mt-1 block text-sm text-slate-500">
-                          Pembayaran perlu dikonfirmasi setelah benar-benar
-                          diterima.
-                        </span>
-                      </span>
-                    </label>
-
-                    <label className="mt-3 flex cursor-pointer gap-3 rounded-xl border border-slate-200 p-4 transition hover:border-emerald-500">
-                      <input
-                        type="radio"
-                        name="metode"
-                        value="COD"
-                        checked={metodePembayaran === 'COD'}
-                        onChange={() => setMetodePembayaran('COD')}
-                        className="mt-1 accent-emerald-700"
-                      />
-                      <span>
-                        <span className="block font-semibold">
-                          COD / Tunai di Warung
-                        </span>
-                        <span className="mt-1 block text-sm text-slate-500">
-                          Pembayaran tunai harus dikonfirmasi oleh penjaga
-                          warung.
-                        </span>
-                      </span>
-                    </label>
-
-                    <div className="mt-5 rounded-xl bg-amber-50 p-4 text-sm leading-relaxed text-amber-900">
-                      <p className="font-semibold">Batas waktu: 5 menit</p>
-                      <p className="mt-1">
-                        Waktu dimulai setelah pesanan berhasil dibuat. Jika
-                        pembayaran atau konfirmasi tidak selesai tepat waktu,
-                        pesanan akan dibatalkan dan stok dikembalikan.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 bg-white p-5">
-                    <h3 className="text-lg font-bold">Barang yang Dipesan</h3>
-                    <div className="mt-4 space-y-3">
-                      {keranjang.map((item) => (
-                        <div
-                          key={item.id}
-                          className="flex justify-between gap-4 text-sm"
-                        >
-                          <span>
-                            {item.nama} × {item.jumlah}
-                          </span>
-                          <span className="shrink-0 font-semibold">
-                            {formatRupiah(item.harga * item.jumlah)}
-                          </span>
+                </div>
+              ) : (
+                <div className="customer-checkout-layout">
+                  <div className="customer-checkout-main">
+                    <section className="customer-checkout-panel">
+                      <div className="customer-checkout-panel-heading">
+                        <span className="customer-checkout-step">01</span>
+                        <div>
+                          <h2>Metode Pembayaran</h2>
+                          <p>Pilih salah satu metode pembayaran.</p>
                         </div>
-                      ))}
+                      </div>
+
+                      <div className="customer-payment-options">
+                        <label
+                          className={`customer-payment-option ${
+                            metodePembayaran === 'QRIS' ? 'selected' : ''
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="metode"
+                            value="QRIS"
+                            checked={metodePembayaran === 'QRIS'}
+                            onChange={() => setMetodePembayaran('QRIS')}
+                          />
+                          <span className="customer-payment-icon qris-icon">
+                            ▦
+                          </span>
+                          <span className="customer-payment-copy">
+                            <strong>QRIS</strong>
+                            <span>
+                              Pembayaran menggunakan QRIS resmi dari warung.
+                            </span>
+                          </span>
+                          <span className="customer-payment-radio" />
+                        </label>
+
+                        <label
+                          className={`customer-payment-option ${
+                            metodePembayaran === 'COD' ? 'selected' : ''
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="metode"
+                            value="COD"
+                            checked={metodePembayaran === 'COD'}
+                            onChange={() => setMetodePembayaran('COD')}
+                          />
+                          <span className="customer-payment-icon cod-icon">
+                            🏪
+                          </span>
+                          <span className="customer-payment-copy">
+                            <strong>COD / Tunai di Warung</strong>
+                            <span>
+                              Bayar langsung kepada penjaga warung.
+                            </span>
+                          </span>
+                          <span className="customer-payment-radio" />
+                        </label>
+                      </div>
+
+                      <div className="customer-payment-notice">
+                        <span aria-hidden="true">ⓘ</span>
+                        <p>
+                          {metodePembayaran === 'QRIS'
+                            ? 'Gunakan QRIS resmi yang disediakan warung. Pembayaran perlu dikonfirmasi dan tidak terverifikasi otomatis oleh aplikasi.'
+                            : 'Siapkan pembayaran tunai dan temui penjaga warung agar pembayaran dapat dikonfirmasi.'}
+                        </p>
+                      </div>
+
+                      <div className="customer-checkout-deadline">
+                        <span aria-hidden="true">◷</span>
+                        <div>
+                          <strong>Batas waktu pembayaran 5 menit</strong>
+                          <p>Waktu dimulai setelah pesanan berhasil dibuat.</p>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className="customer-checkout-panel">
+                      <div className="customer-checkout-panel-heading">
+                        <span className="customer-checkout-step">02</span>
+                        <div>
+                          <h2>Barang yang Dipesan</h2>
+                          <p>
+                            {jumlahBarang} item dari {keranjang.length} jenis
+                            produk.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="customer-checkout-items">
+                        {keranjang.map((item) => (
+                          <div
+                            key={item.id}
+                            className="customer-checkout-item"
+                          >
+                            <div className="customer-checkout-item-image">
+                              {item.foto ? (
+                                <img src={item.foto} alt={item.nama} />
+                              ) : (
+                                <span aria-hidden="true">🛍️</span>
+                              )}
+                            </div>
+                            <div className="customer-checkout-item-copy">
+                              <strong>{item.nama}</strong>
+                              <span>
+                                {formatRupiah(item.harga)} / {item.satuan}
+                              </span>
+                              <small>Jumlah: {item.jumlah}</small>
+                            </div>
+                            <strong className="customer-checkout-item-total">
+                              {formatRupiah(item.harga * item.jumlah)}
+                            </strong>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  </div>
+
+                  <aside className="customer-checkout-summary">
+                    <div className="customer-checkout-summary-top">
+                      <span>RINGKASAN PESANAN</span>
+                      <div className="customer-checkout-summary-icon">✓</div>
                     </div>
-                  </div>
+                    <h2>Hampir selesai!</h2>
+                    <p className="customer-checkout-summary-description">
+                      Pastikan pilihan pembayaran dan jumlah belanja sudah
+                      sesuai.
+                    </p>
+                    <div className="customer-checkout-summary-row">
+                      <span>Jumlah barang</span>
+                      <strong>{jumlahBarang} item</strong>
+                    </div>
+                    <div className="customer-checkout-summary-row">
+                      <span>Jenis produk</span>
+                      <strong>{keranjang.length} produk</strong>
+                    </div>
+                    <div className="customer-checkout-summary-row">
+                      <span>Pembayaran</span>
+                      <strong>{metodePembayaran}</strong>
+                    </div>
+                    <div className="customer-checkout-summary-divider" />
+                    <div className="customer-checkout-total">
+                      <span>Total pembayaran</span>
+                      <strong>{formatRupiah(totalBelanja)}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={buatPesanan}
+                      disabled={checkoutLoading || keranjang.length === 0}
+                      className="customer-checkout-primary"
+                    >
+                      {checkoutLoading
+                        ? 'Membuat pesanan...'
+                        : 'Buat Pesanan'}
+                      {!checkoutLoading && (
+                        <span aria-hidden="true">→</span>
+                      )}
+                    </button>
+                    <p className="customer-checkout-terms">
+                      Dengan membuat pesanan, kamu dapat memeriksa status
+                      pembayaran melalui halaman detail pesanan.
+                    </p>
+                  </aside>
                 </div>
+              )}
+            </section>
+          )}
 
-                <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-5 md:col-span-2">
-                  <h3 className="text-lg font-bold">Ringkasan</h3>
-                  <div className="mt-4 flex justify-between gap-3 text-sm">
-                    <span className="text-slate-500">Jumlah barang</span>
-                    <span>{jumlahBarang} item</span>
-                  </div>
-                  <div className="mt-3 flex justify-between gap-3">
-                    <span className="font-semibold">Total</span>
-                    <span className="text-right text-xl font-bold text-emerald-700">
-                      {formatRupiah(totalBelanja)}
-                    </span>
-                  </div>
-                  <button
-                    onClick={buatPesanan}
-                    disabled={checkoutLoading || keranjang.length === 0}
-                    className="mt-6 w-full rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {checkoutLoading ? 'Membuat Pesanan...' : 'Buat Pesanan'}
-                  </button>
-                  <p className="mt-3 text-xs leading-relaxed text-slate-500">
-                    Pesanan akan divalidasi berdasarkan harga dan stok di
-                    database.
+          {halaman === 'pesanan' && pesananAktif && (
+            <section className="customer-order-page">
+              <header className="customer-order-heading">
+                <div>
+                  <span className="customer-order-eyebrow">
+                    INFORMASI PESANAN
+                  </span>
+                  <h1>Detail Pesanan</h1>
+                  <p>
+                    Simpan kode pesanan untuk memeriksa status transaksi kamu.
                   </p>
-                </aside>
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ================= STATUS PESANAN ================= */}
-        {halaman === 'pesanan' && pesananAktif && (
-          <section className="mx-auto max-w-2xl">
-            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-9">
-              <div className="text-center">
-                <div className="text-5xl" aria-hidden="true">
-                  {pesananAktif.status === 'dibatalkan' ? '❌' : '🧾'}
                 </div>
-                <h2 className="mt-4 text-2xl font-bold">
-                  Detail Pesanan
-                </h2>
-                <p className="mt-2 text-slate-500">
-                  Simpan kode pesanan ini untuk memeriksa statusnya.
-                </p>
+                <button
+                  type="button"
+                  className="customer-page-back"
+                  onClick={async () => {
+                    await ambilBarang();
+                    bukaKatalog();
+                  }}
+                >
+                  <span aria-hidden="true">←</span>
+                  Kembali ke Katalog
+                </button>
+              </header>
 
-                <div className="mt-5 rounded-xl bg-emerald-50 p-4">
-                  <p className="text-sm text-emerald-800">Kode Pesanan</p>
-                  <p className="mt-1 break-all text-lg font-bold text-emerald-900">
-                    {pesananAktif.kode_pesanan}
-                  </p>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard?.writeText(
-                        pesananAktif.kode_pesanan
-                      );
-                      tampilkanPesan('Kode pesanan disalin.');
-                    }}
-                    className="mt-2 text-sm font-semibold text-emerald-800 underline"
+              <section className="customer-order-status-card">
+                <div className="customer-order-status-top">
+                  <div className="customer-order-status-symbol">
+                    {pesananAktif.status === 'dibatalkan'
+                      ? '×'
+                      : ['dibayar', 'diproses', 'selesai'].includes(
+                          pesananAktif.status
+                        )
+                        ? '✓'
+                        : '◷'}
+                  </div>
+                  <div className="customer-order-status-copy">
+                    <span>Status pesanan</span>
+                    <h2>{labelStatus(pesananAktif.status)}</h2>
+                    <p>
+                      {pesananAktif.status === 'dibatalkan'
+                        ? 'Pesanan ini telah dibatalkan.'
+                        : pesananAktif.status === 'selesai'
+                          ? 'Pesanan telah selesai diproses.'
+                          : pesananAktif.status === 'diproses'
+                            ? 'Pesanan sedang diproses oleh warung.'
+                            : pesananAktif.status === 'dibayar'
+                              ? 'Pembayaran telah tercatat.'
+                              : pesananAktif.status === 'menunggu_konfirmasi'
+                                ? 'Menunggu konfirmasi pembayaran dari warung.'
+                                : 'Selesaikan pembayaran sebelum batas waktunya.'}
+                    </p>
+                  </div>
+                  <span
+                    className={`customer-order-status-badge status-${pesananAktif.status}`}
                   >
-                    Salin kode pesanan
-                  </button>
-                </div>
-
-                <div className="mt-5 rounded-xl border border-slate-200 p-4">
-                  <p className="text-sm text-slate-500">Status Pesanan</p>
-                  <p className="mt-1 text-lg font-bold text-emerald-700">
                     {labelStatus(pesananAktif.status)}
-                  </p>
-                  <p className="mt-3 text-sm text-slate-500">
-                    Metode: {pesananAktif.metode_pembayaran}
-                  </p>
-                  <p className="mt-1 text-2xl font-bold">
-                    {formatRupiah(pesananAktif.total)}
-                  </p>
+                  </span>
                 </div>
-              </div>
+
+                <div className="customer-order-status-meta">
+                  <div>
+                    <span>Metode pembayaran</span>
+                    <strong>
+                      {pesananAktif.metode_pembayaran === 'QRIS'
+                        ? 'QRIS'
+                        : 'COD / Tunai di Warung'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Total pesanan</span>
+                    <strong>{formatRupiah(pesananAktif.total)}</strong>
+                  </div>
+                </div>
+
+                <div className="customer-order-code">
+                  <div>
+                    <span>Kode pesanan</span>
+                    <strong>{pesananAktif.kode_pesanan}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (navigator.clipboard?.writeText) {
+                        navigator.clipboard
+                          .writeText(pesananAktif.kode_pesanan)
+                          .then(() => tampilkanPesan('Kode pesanan disalin.'))
+                          .catch(() =>
+                            tampilkanPesan(
+                              `Kode pesanan: ${pesananAktif.kode_pesanan}`
+                            )
+                          );
+                      } else {
+                        tampilkanPesan(
+                          `Kode pesanan: ${pesananAktif.kode_pesanan}`
+                        );
+                      }
+                    }}
+                  >
+                    Salin kode
+                  </button>
+                </div>
+              </section>
 
               {statusMenunggu && (
-                <div className="mt-6 rounded-2xl bg-amber-50 p-5 text-center">
-                  <p className="font-semibold text-amber-900">
-                    {detikTersisa > 0
-                      ? 'Selesaikan pembayaran sebelum waktu habis'
-                      : 'Waktu habis, menunggu konfirmasi pembatalan dari server'}
-                  </p>
-                  <p className="my-3 text-4xl font-bold tabular-nums text-amber-900">
-                    {formatWaktu(detikTersisa)}
-                  </p>
-                  <p className="text-sm leading-relaxed text-amber-900">
-                    {pesananAktif.metode_pembayaran === 'QRIS'
-                      ? 'Gunakan QRIS resmi yang disediakan warung. Pembayaran belum otomatis terverifikasi oleh aplikasi ini.'
-                      : 'Hubungi atau temui penjaga warung untuk melakukan pembayaran tunai dan meminta konfirmasi.'}
-                  </p>
-                </div>
+                <section
+                  className={`customer-order-timer ${
+                    detikTersisa <= 0 ? 'timer-expired' : ''
+                  }`}
+                >
+                  <div className="customer-order-timer-icon" aria-hidden="true">
+                    ◷
+                  </div>
+                  <div className="customer-order-timer-copy">
+                    <h3>
+                      {detikTersisa > 0
+                        ? 'Selesaikan pembayaran'
+                        : 'Batas waktu pembayaran habis'}
+                    </h3>
+                    <p>
+                      {detikTersisa > 0
+                        ? pesananAktif.metode_pembayaran === 'QRIS'
+                          ? 'Gunakan QRIS resmi dari warung. Pembayaran belum otomatis terverifikasi.'
+                          : 'Temui penjaga warung untuk membayar tunai dan meminta konfirmasi.'
+                        : 'Pesanan sedang menunggu pembaruan status dari server.'}
+                    </p>
+                  </div>
+                  <div className="customer-order-countdown">
+                    <span>Sisa waktu</span>
+                    <strong>{formatWaktu(detikTersisa)}</strong>
+                  </div>
+                </section>
               )}
 
               {pesananAktif.status === 'dibatalkan' && (
-                <div className="mt-6 rounded-xl bg-red-50 p-4 text-sm leading-relaxed text-red-800">
-                  Pesanan telah dibatalkan. Stok yang sebelumnya dicadangkan
-                  akan dikembalikan oleh backend.
+                <div className="customer-order-message cancelled-message">
+                  <strong>Pesanan dibatalkan</strong>
+                  <p>
+                    Pesanan sudah dibatalkan. Stok yang sebelumnya dicadangkan
+                    akan ditangani oleh backend.
+                  </p>
                 </div>
               )}
 
               {['dibayar', 'diproses', 'selesai'].includes(
                 pesananAktif.status
               ) && (
-                <div className="mt-6 rounded-xl bg-emerald-50 p-4 text-sm leading-relaxed text-emerald-800">
-                  Status pesanan sudah diperbarui oleh backend.
+                <div className="customer-order-message success-message">
+                  <strong>Informasi pesanan diperbarui</strong>
+                  <p>
+                    Status pesanan ini sudah tercatat pada sistem warung.
+                  </p>
                 </div>
               )}
 
-              <div className="mt-6 rounded-xl border border-slate-200 p-4">
-                <h3 className="font-bold">Rincian Barang</h3>
-                <div className="mt-3 space-y-3">
+              <section className="customer-order-items-panel">
+                <div className="customer-order-panel-heading">
+                  <div>
+                    <h2>Rincian Barang</h2>
+                    <p>Daftar barang yang ada dalam pesanan ini.</p>
+                  </div>
+                  <span className="customer-order-items-count">
+                    {(pesananAktif.items || []).length} produk
+                  </span>
+                </div>
+
+                <div className="customer-order-items-list">
                   {(pesananAktif.items || []).map((item, index) => (
                     <div
                       key={`${item.barang_id}-${index}`}
-                      className="flex justify-between gap-3 text-sm"
+                      className="customer-order-item"
                     >
-                      <span>
-                        {item.nama_barang || item.nama} × {item.jumlah}
-                      </span>
-                      <span className="shrink-0 font-semibold">
+                      <div className="customer-order-item-icon" aria-hidden="true">
+                        🛍️
+                      </div>
+                      <div className="customer-order-item-copy">
+                        <strong>{item.nama_barang || item.nama}</strong>
+                        <span>Jumlah: {item.jumlah}</span>
+                      </div>
+                      <strong className="customer-order-item-price">
                         {formatRupiah(
                           item.subtotal ??
                             Number(item.harga) * Number(item.jumlah)
                         )}
-                      </span>
+                      </strong>
                     </div>
                   ))}
                 </div>
+
+                <div className="customer-order-total-row">
+                  <span>Total pembayaran</span>
+                  <strong>{formatRupiah(pesananAktif.total)}</strong>
+                </div>
+              </section>
+
+              <div className="customer-order-actions">
+                <button
+                  type="button"
+                  className="customer-order-refresh"
+                  onClick={perbaruiStatusPesanan}
+                  disabled={memuatStatus}
+                >
+                  <span aria-hidden="true">↻</span>
+                  {memuatStatus
+                    ? 'Memeriksa status...'
+                    : 'Perbarui Status'}
+                </button>
+                <button
+                  type="button"
+                  className="customer-order-return"
+                  onClick={async () => {
+                    await ambilBarang();
+                    bukaKatalog();
+                  }}
+                >
+                  Kembali ke Katalog
+                  <span aria-hidden="true">→</span>
+                </button>
               </div>
+            </section>
+          )}
 
-              <button
-                onClick={perbaruiStatusPesanan}
-                disabled={memuatStatus}
-                className="mt-6 w-full rounded-xl border border-emerald-700 px-4 py-3 font-semibold text-emerald-700 transition hover:bg-emerald-50 disabled:opacity-50"
-              >
-                {memuatStatus ? 'Memeriksa Status...' : 'Perbarui Status'}
-              </button>
+          {halaman === 'admin' && (
+            <section>
+              {!adminToken ? (
+                <div className="mx-auto max-w-md rounded-xl border border-slate-200 bg-white p-6">
+                  <h2 className="page-heading">Login Admin</h2>
+                  <form className="mt-5 space-y-4" onSubmit={loginAdmin}>
+                    <label className="block text-sm font-medium">
+                      Username
+                      <input className="mt-1 w-full rounded-lg border border-slate-300 p-3" value={adminUsername} onChange={(event) => setAdminUsername(event.target.value)} required autoComplete="username" />
+                    </label>
+                    <label className="block text-sm font-medium">
+                      Password
+                      <input className="mt-1 w-full rounded-lg border border-slate-300 p-3" type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} required autoComplete="current-password" />
+                    </label>
+                    {adminError && <p role="alert" className="error-message">{adminError}</p>}
+                    <button className="checkout-button" disabled={adminLoading}>
+                      {adminLoading ? 'Memproses...' : 'Login'}
+                    </button>
+                  </form>
+                </div>
+              ) : (
+                <>
+                  {adminError && <p role="alert" className="error-message mt-3">{adminError}</p>}
+                  {adminView === 'dashboard' && (
+                    <section id="admin-panel" className="mt-5">
+                      <div className="mb-5">
+                        <h3 className="text-xl font-bold">Ringkasan Dashboard</h3>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Ringkasan produk dan seluruh status pesanan warung.
+                        </p>
+                      </div>
+                      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Total Barang</p>
+                          <p className="mt-2 text-3xl font-bold">{barang.length}</p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Total Pesanan</p>
+                          <p className="mt-2 text-3xl font-bold">{adminPesanan.length}</p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Menunggu Pembayaran</p>
+                          <p className="mt-2 text-3xl font-bold text-amber-600">
+                            {adminPesanan.filter((pesanan) => pesanan.status === 'menunggu_pembayaran').length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Menunggu Konfirmasi COD</p>
+                          <p className="mt-2 text-3xl font-bold text-blue-600">
+                            {adminPesanan.filter((pesanan) => pesanan.status === 'menunggu_konfirmasi').length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Pesanan Diproses</p>
+                          <p className="mt-2 text-3xl font-bold text-purple-600">
+                            {adminPesanan.filter((pesanan) => pesanan.status === 'diproses').length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Pesanan Selesai</p>
+                          <p className="mt-2 text-3xl font-bold text-green-600">
+                            {adminPesanan.filter((pesanan) => pesanan.status === 'selesai').length}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                          <p className="text-sm text-slate-500">Pesanan Dibatalkan</p>
+                          <p className="mt-2 text-3xl font-bold text-red-600">
+                            {adminPesanan.filter((pesanan) => pesanan.status === 'dibatalkan').length}
+                          </p>
+                        </div>
+                      </div>
+                    </section>
+                  )}
 
-              <button
-                onClick={async () => {
-                  await ambilBarang();
-                  bukaKatalog();
-                }}
-                className="mt-3 w-full rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white transition hover:bg-emerald-800"
-              >
-                Kembali ke Katalog
-              </button>
-            </div>
-          </section>
-        )}
+                  {adminView === 'barang' && (
+                    <section id="admin-barang" className="mt-5">
+                      <h3 className="mb-4 text-xl font-bold">Kelola Barang</h3>
+                      <div className="admin-product-grid">
+                        {barang.length === 0 ? (
+                          <p className="admin-product-empty">
+                            Belum ada barang di katalog.
+                          </p>
+                        ) : (
+                          barang.map((item) => (
+                            <article key={item.id} className="admin-product-card">
+                              <div className="admin-product-image">
+                                {item.foto ? (
+                                  <img src={item.foto} alt={item.nama} />
+                                ) : (
+                                  <span aria-hidden="true">📦</span>
+                                )}
+                              </div>
+                              <div className="admin-product-details">
+                                <h4 title={item.nama}>{item.nama}</h4>
+                                <span className="admin-product-category">
+                                  {item.kategori || 'Tanpa kategori'}
+                                </span>
+                                <strong className="admin-product-price">
+                                  {formatRupiah(item.harga)}
+                                </strong>
+                                <span className="admin-product-stock">
+                                  Stok: {item.stok} {item.satuan}
+                                </span>
+                              </div>
+                              <div className="admin-product-actions">
+                                <button
+                                  type="button"
+                                  className="admin-product-edit"
+                                  onClick={() => {
+                                    mulaiEditBarang(item);
+                                    setAdminView('tambah');
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="admin-product-delete"
+                                  onClick={() => hapusBarangAdmin(item)}
+                                  disabled={adminLoading}
+                                >
+                                  Hapus
+                                </button>
+                              </div>
+                            </article>
+                          ))
+                        )}
+                      </div>
+                    </section>
+                  )}
+
+                  {adminView === 'tambah' && (
+                    <section
+                      id="admin-tambah-barang"
+                      className="admin-form-section"
+                    >
+                      <div className="admin-form-heading">
+                        <div>
+                          <h2>{barangEditId ? 'Edit Barang' : 'Tambah Barang'}</h2>
+                          <p>
+                            Lengkapi informasi produk untuk katalog Warung Nenek Yoyoh.
+                          </p>
+                        </div>
+                        {barangEditId && (
+                          <span className="admin-edit-badge">Mode Edit</span>
+                        )}
+                      </div>
+
+                      <form
+                        onSubmit={barangEditId ? simpanEditBarang : tambahBarang}
+                        className="admin-form"
+                      >
+                        <div className="admin-form-grid">
+                          <div className="admin-field">
+                            <label htmlFor="barang-nama">Nama barang</label>
+                            <input
+                              id="barang-nama"
+                              value={formBarang.nama}
+                              onChange={(event) =>
+                                setFormBarang({ ...formBarang, nama: event.target.value })
+                              }
+                              required
+                              maxLength={100}
+                              placeholder="Contoh: Minyak Goreng"
+                            />
+                          </div>
+
+                          <div className="admin-field">
+                            <label htmlFor="barang-kategori">Kategori</label>
+                            <select
+                              id="barang-kategori"
+                              value={formBarang.kategori}
+                              onChange={(event) => {
+                                if (event.target.value === '__tambah_kategori__') {
+                                  setTambahKategoriTerbuka(true);
+                                  setKategoriBaruInput('');
+                                  return;
+                                }
+
+                                setFormBarang({
+                                  ...formBarang,
+                                  kategori: event.target.value,
+                                });
+                              }}
+                              required
+                            >
+                              <option value="">Pilih kategori</option>
+                              {kategoriAdmin.map((kategori) => (
+                                <option key={kategori} value={kategori}>
+                                  {kategori}
+                                </option>
+                              ))}
+                              <option value="__tambah_kategori__">
+                                ＋ Tambah kategori baru
+                              </option>
+                            </select>
+
+                            {tambahKategoriTerbuka && (
+                              <div className="admin-category-create">
+                                <input
+                                  value={kategoriBaruInput}
+                                  onChange={(event) =>
+                                    setKategoriBaruInput(event.target.value)
+                                  }
+                                  placeholder="Nama kategori baru"
+                                  maxLength={50}
+                                  autoFocus
+                                />
+                                <button type="button" onClick={simpanKategoriBaru}>
+                                  Simpan
+                                </button>
+                                <button
+                                  type="button"
+                                  className="admin-category-cancel"
+                                  onClick={() => {
+                                    setTambahKategoriTerbuka(false);
+                                    setKategoriBaruInput('');
+                                  }}
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="admin-field">
+                            <label htmlFor="barang-harga">Harga (Rp)</label>
+                            <input
+                              id="barang-harga"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={formBarang.harga}
+                              onChange={(event) =>
+                                setFormBarang({ ...formBarang, harga: event.target.value })
+                              }
+                              required
+                              placeholder="Contoh: 15000"
+                            />
+                          </div>
+
+                          <div className="admin-field">
+                            <label htmlFor="barang-stok">Jumlah stok</label>
+                            <input
+                              id="barang-stok"
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={formBarang.stok}
+                              onChange={(event) =>
+                                setFormBarang({ ...formBarang, stok: event.target.value })
+                              }
+                              required
+                              placeholder="Contoh: 20"
+                            />
+                          </div>
+
+                          <div className="admin-field">
+                            <label htmlFor="barang-satuan">Satuan</label>
+                            <select
+                              id="barang-satuan"
+                              value={formBarang.satuan}
+                              onChange={(event) =>
+                                setFormBarang({ ...formBarang, satuan: event.target.value })
+                              }
+                              required
+                            >
+                              <option value="">Pilih satuan</option>
+                              <option value="pcs">Pcs</option>
+                              <option value="kg">Kilogram (kg)</option>
+                              <option value="liter">Liter</option>
+                              <option value="bungkus">Bungkus</option>
+                              <option value="pack">Pack</option>
+                              <option value="botol">Botol</option>
+                              <option value="karung">Karung</option>
+                              <option value="dus">Dus</option>
+                              <option value="ikat">Ikat</option>
+                            </select>
+                          </div>
+
+                          <div className="admin-field admin-field-full">
+                            <label htmlFor="barang-foto">Foto produk</label>
+                            <div className="admin-photo-picker">
+                              <div className="admin-photo-preview">
+                                {formBarang.foto ? (
+                                  <img src={formBarang.foto} alt="Preview produk" />
+                                ) : (
+                                  <div className="admin-photo-empty">
+                                    <span>▧</span>
+                                    <p>Preview foto produk</p>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="admin-photo-controls">
+                                <input
+                                  id="barang-foto"
+                                  type="file"
+                                  accept="image/jpeg,image/png,image/webp"
+                                  onChange={handleUploadFoto}
+                                  disabled={fotoDiproses}
+                                />
+                                <p>
+                                  JPG, PNG, atau WebP. Foto otomatis diperkecil agar
+                                  proses penyimpanan lebih ringan.
+                                </p>
+                                {formBarang.foto && (
+                                  <button
+                                    type="button"
+                                    className="admin-remove-photo"
+                                    onClick={() =>
+                                      setFormBarang({ ...formBarang, foto: '' })
+                                    }
+                                  >
+                                    Hapus foto
+                                  </button>
+                                )}
+                                {fotoDiproses && (
+                                  <p className="admin-upload-status">
+                                    Memproses foto...
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="admin-field admin-field-full">
+                            <label htmlFor="barang-deskripsi">
+                              Deskripsi <span>(opsional)</span>
+                            </label>
+                            <textarea
+                              id="barang-deskripsi"
+                              rows={4}
+                              value={formBarang.deskripsi}
+                              onChange={(event) =>
+                                setFormBarang({
+                                  ...formBarang,
+                                  deskripsi: event.target.value,
+                                })
+                              }
+                              placeholder="Tambahkan informasi produk jika diperlukan..."
+                            />
+                          </div>
+                        </div>
+
+                        {tambahBarangError && (
+                          <p className="admin-form-error" role="alert">
+                            {tambahBarangError}
+                          </p>
+                        )}
+                        {tambahBarangPesan && (
+                          <p className="admin-form-success" role="status">
+                            {tambahBarangPesan}
+                          </p>
+                        )}
+
+                        <div className="admin-form-actions">
+                          {barangEditId && (
+                            <button
+                              type="button"
+                              className="admin-form-secondary"
+                              onClick={() => {
+                                setBarangEditId(null);
+                                setFormBarang({
+                                  nama: '',
+                                  kategori: '',
+                                  harga: '',
+                                  stok: '',
+                                  satuan: 'pcs',
+                                  foto: '',
+                                  deskripsi: '',
+                                });
+                                setTambahBarangError('');
+                                setTambahBarangPesan('');
+                                setTambahKategoriTerbuka(false);
+                              }}
+                            >
+                              Batal Edit
+                            </button>
+                          )}
+                          <button
+                            type="submit"
+                            className="admin-form-primary"
+                            disabled={tambahBarangLoading || fotoDiproses}
+                          >
+                            {fotoDiproses
+                              ? 'Memproses foto...'
+                              : tambahBarangLoading
+                                ? 'Menyimpan...'
+                                : barangEditId
+                                  ? 'Simpan Perubahan'
+                                  : 'Simpan Barang'}
+                          </button>
+                        </div>
+                      </form>
+                    </section>
+                  )}
+
+                  {adminView === 'pesanan' && (
+                    <div id="admin-pesanan" className="mt-7">
+                      <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                        <div>
+                          <h3 className="text-xl font-bold">Daftar Pesanan</h3>
+                          <p className="mt-1 text-sm text-slate-500">
+                            Kelola dan perbarui status pesanan pelanggan.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => ambilPesananAdmin()}
+                          disabled={adminLoading}
+                          className="rounded-xl border border-purple-600 px-4 py-2 font-semibold text-purple-700 hover:bg-purple-50 disabled:opacity-50"
+                        >
+                          {adminLoading ? 'Memuat...' : 'Refresh Pesanan'}
+                        </button>
+                      </div>
+                      {adminPesanan.length === 0 ? (
+                        <p className="empty-message mt-3">Belum ada pesanan.</p>
+                      ) : (
+                        <div className="cart-list">
+                          {adminPesanan.map((pesanan) => (
+                        <article className="cart-summary" key={pesanan.id}>
+                          <div className="flex flex-wrap justify-between gap-2">
+                            <strong>{pesanan.kode_pesanan}</strong>
+                            <span>{labelStatus(pesanan.status)}</span>
+                          </div>
+                          <p className="mt-2 text-sm">{pesanan.metode_pembayaran} · {formatRupiah(pesanan.total)}</p>
+                          {(pesanan.items || []).map((item, index) => (
+                            <p className="mt-1 text-sm" key={`${item.barang_id}-${index}`}>{item.nama_barang} × {item.jumlah}</p>
+                          ))}
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {pesanan.status === 'menunggu_konfirmasi' && pesanan.metode_pembayaran === 'COD' && (
+                              <button
+                                className="checkout-button"
+                                disabled={adminLoading}
+                                onClick={async () => {
+                                  if (!window.confirm('Pastikan uang tunai sudah diterima. Konfirmasi pesanan ini?')) return;
+                                  setAdminLoading(true);
+                                  setAdminError('');
+                                  try {
+                                    const response = await fetch(`${API_PESANAN}/${encodeURIComponent(pesanan.kode_pesanan)}/konfirmasi-cod`, {
+                                      method: 'POST',
+                                      headers: { Authorization: `Bearer ${adminToken}` },
+                                    });
+                                    const data = await response.json();
+                                    if (!response.ok) throw new Error(data.message || 'Konfirmasi COD gagal.');
+                                    await ambilPesananAdmin();
+                                  } catch (err) {
+                                    setAdminError(err.message || 'Konfirmasi COD gagal.');
+                                  } finally {
+                                    setAdminLoading(false);
+                                  }
+                                }}
+                              >
+                                Konfirmasi Pembayaran COD
+                              </button>
+                            )}
+                            {pesanan.status === 'diproses' && <button className="view-all-button" onClick={() => ubahStatusPesanan(pesanan, 'selesai')}>Selesaikan</button>}
+                            {['menunggu_pembayaran', 'menunggu_konfirmasi'].includes(pesanan.status) && <button className="view-all-button" onClick={() => ubahStatusPesanan(pesanan, 'dibatalkan')}>Batalkan</button>}
+                          </div>
+                        </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          )}
+        </div>
       </main>
 
       <footer className="mt-12 border-t border-slate-200 bg-white">
@@ -1761,86 +2251,127 @@ function logoutAdmin() {
         </div>
       </footer>
 
-      {/* ================= DETAIL BARANG ================= */}
+      {/* ================= DETAIL PRODUK PELANGGAN ================= */}
       {barangDipilih && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/50 p-4"
+          className="customer-detail-overlay"
           onClick={() => setBarangDipilih(null)}
         >
           <section
             role="dialog"
             aria-modal="true"
             aria-labelledby="judul-detail"
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white shadow-xl"
+            className="customer-detail-modal"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="relative flex h-56 items-center justify-center overflow-hidden bg-emerald-50 text-7xl">
+            <button
+              type="button"
+              className="customer-detail-close"
+              onClick={() => setBarangDipilih(null)}
+              aria-label="Tutup detail produk"
+            >
+              ×
+            </button>
+
+            <div className="customer-detail-media">
               {barangDipilih.foto ? (
                 <img
                   src={barangDipilih.foto}
                   alt={barangDipilih.nama}
-                  className="h-full w-full object-cover"
                 />
               ) : (
-                <span aria-hidden="true">🛒</span>
+                <div className="customer-detail-placeholder">
+                  <span aria-hidden="true">
+                    {barangDipilih.kategori?.toLowerCase().includes('beras')
+                      ? '🌾'
+                      : barangDipilih.kategori?.toLowerCase().includes('minyak')
+                        ? '🫒'
+                        : barangDipilih.kategori?.toLowerCase().includes('mie')
+                          ? '🍜'
+                          : barangDipilih.kategori?.toLowerCase().includes('sembako')
+                            ? '🧺'
+                            : '🛍️'}
+                  </span>
+                  <p>Foto produk belum tersedia</p>
+                </div>
               )}
-
-              <button
-                onClick={() => setBarangDipilih(null)}
-                aria-label="Tutup detail"
-                className="absolute right-3 top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-xl shadow hover:bg-slate-100"
-              >
-                ×
-              </button>
+              <span className="customer-detail-photo-label">DETAIL PRODUK</span>
             </div>
 
-            <div className="p-6">
-              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                {barangDipilih.kategori}
-              </span>
+            <div className="customer-detail-content">
+              <div className="customer-detail-topline">
+                <span className="customer-detail-category">
+                  {barangDipilih.kategori || 'Lainnya'}
+                </span>
+                <span
+                  className={`customer-detail-stock-badge ${
+                    Number(barangDipilih.stok) > 0
+                      ? 'available'
+                      : 'unavailable'
+                  }`}
+                >
+                  <span className="customer-detail-stock-dot" />
+                  {Number(barangDipilih.stok) > 0
+                    ? 'Stok tersedia'
+                    : 'Stok habis'}
+                </span>
+              </div>
 
-              <h2 id="judul-detail" className="mt-4 text-2xl font-bold">
+              <h2 id="judul-detail" className="customer-detail-title">
                 {barangDipilih.nama}
               </h2>
 
-              <p className="mt-3 text-2xl font-bold text-emerald-700">
-                {formatRupiah(barangDipilih.harga)}
-                <span className="ml-1 text-sm font-normal text-slate-500">
-                  / {barangDipilih.satuan}
-                </span>
-              </p>
-
-              <div className="mt-5 rounded-xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Ketersediaan</p>
-                <p
-                  className={`mt-1 font-semibold ${
-                    Number(barangDipilih.stok) > 0
-                      ? 'text-emerald-700'
-                      : 'text-red-600'
-                  }`}
-                >
-                  {Number(barangDipilih.stok) > 0
-                    ? `${barangDipilih.stok} ${barangDipilih.satuan} tersedia`
-                    : 'Stok habis'}
-                </p>
+              <div className="customer-detail-price">
+                <strong>{formatRupiah(barangDipilih.harga)}</strong>
+                <span>/ {barangDipilih.satuan}</span>
               </div>
 
-              {barangDipilih.deskripsi && (
-                <div className="mt-5">
-                  <h3 className="font-semibold">Deskripsi</h3>
-                  <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-600">
-                    {barangDipilih.deskripsi}
+              <div className="customer-detail-divider" />
+
+              <div className="customer-detail-inventory">
+                <div className="customer-detail-inventory-icon">
+                  <span aria-hidden="true">📦</span>
+                </div>
+                <div>
+                  <p className="customer-detail-label">Ketersediaan barang</p>
+                  <p
+                    className={`customer-detail-inventory-value ${
+                      Number(barangDipilih.stok) > 0
+                        ? 'available'
+                        : 'unavailable'
+                    }`}
+                  >
+                    {Number(barangDipilih.stok) > 0
+                      ? `${barangDipilih.stok} ${barangDipilih.satuan} tersedia`
+                      : 'Maaf, barang sedang habis'}
                   </p>
+                </div>
+              </div>
+
+              {barangDipilih.deskripsi?.trim() && (
+                <div className="customer-detail-description">
+                  <h3>Deskripsi produk</h3>
+                  <p>{barangDipilih.deskripsi}</p>
                 </div>
               )}
 
-              <button
-                onClick={() => tambahKeKeranjang(barangDipilih)}
-                disabled={Number(barangDipilih.stok) <= 0}
-                className="mt-6 w-full rounded-xl bg-emerald-700 px-4 py-3 font-semibold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-              >
-                + Tambahkan ke Keranjang
-              </button>
+              <div className="customer-detail-footer">
+                <p>Harga per {barangDipilih.satuan}</p>
+                <button
+                  type="button"
+                  className="customer-detail-add-button"
+                  onClick={() => tambahKeKeranjang(barangDipilih)}
+                  disabled={Number(barangDipilih.stok) <= 0}
+                >
+                  <span aria-hidden="true">＋</span>
+                  {Number(barangDipilih.stok) > 0
+                    ? 'Tambahkan ke Keranjang'
+                    : 'Stok Habis'}
+                </button>
+                <p className="customer-detail-note">
+                  Periksa jumlah dan total belanja kembali di keranjang.
+                </p>
+              </div>
             </div>
           </section>
         </div>
