@@ -5,6 +5,7 @@ const API = 'http://localhost:3000/api';
 const API_BARANG = `${API}/barang`;
 const API_CHECKOUT = `${API}/checkout`;
 const API_PESANAN = `${API}/pesanan`;
+const KUNCI_RIWAYAT_PESANAN = 'riwayat-pesanan-wny';
 
 function formatRupiah(harga) {
   return new Intl.NumberFormat('id-ID', {
@@ -17,6 +18,25 @@ function formatRupiah(harga) {
 function bacaKeranjang() {
   try {
     return JSON.parse(localStorage.getItem('keranjang-wny')) || [];
+  } catch {
+    return [];
+  }
+}
+
+function bacaKodeRiwayatPesanan() {
+  try {
+    const data = JSON.parse(
+      localStorage.getItem(KUNCI_RIWAYAT_PESANAN) || '[]'
+    );
+    return Array.isArray(data)
+      ? [
+          ...new Set(
+            data.filter(
+              (kode) => typeof kode === 'string' && kode.length <= 40
+            )
+          ),
+        ].slice(-100)
+      : [];
   } catch {
     return [];
   }
@@ -94,7 +114,8 @@ function App() {
   const [barang, setBarang] = useState([]);
   const [keranjang, setKeranjang] = useState(bacaKeranjang);
   const [pencarian, setPencarian] = useState('');
-  const [kategoriAktif, setKategoriAktif] = useState('Semua');
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [selectedCategories, setSelectedCategories] = useState([]);
   const [halaman, setHalaman] = useState('katalog');
   const [adminView, setAdminView] = useState('dashboard');
   const [barangDipilih, setBarangDipilih] = useState(null);
@@ -104,6 +125,10 @@ function App() {
 
   const [metodePembayaran, setMetodePembayaran] = useState('QRIS');
   const [pesananAktif, setPesananAktif] = useState(null);
+  const [riwayatPesanan, setRiwayatPesanan] = useState([]);
+  const [riwayatLoading, setRiwayatLoading] = useState(true);
+  const [riwayatError, setRiwayatError] = useState('');
+  const [riwayatRefreshKey, setRiwayatRefreshKey] = useState(0);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [waktuSekarang, setWaktuSekarang] = useState(Date.now);
   const [memuatStatus, setMemuatStatus] = useState(false);
@@ -203,10 +228,55 @@ function App() {
     localStorage.setItem('keranjang-wny', JSON.stringify(keranjang));
   }, [keranjang]);
 
-  const daftarKategori = useMemo(
-    () => ['Semua', ...new Set(barang.map((item) => item.kategori))],
-    [barang]
-  );
+  const muatRiwayatPesanan = useCallback(async (signal) => {
+    await Promise.resolve();
+    if (signal.aborted) return;
+    const kodePesanan = bacaKodeRiwayatPesanan();
+
+    if (kodePesanan.length === 0) {
+      setRiwayatPesanan([]);
+      setRiwayatLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_PESANAN}/riwayat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kode_pesanan: kodePesanan }),
+        signal,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Riwayat pesanan gagal dimuat.');
+      }
+      setRiwayatPesanan(
+        Array.isArray(data.pesanan) ? data.pesanan : []
+      );
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        setRiwayatError(err.message || 'Riwayat pesanan gagal dimuat.');
+      }
+    } finally {
+      if (!signal.aborted) {
+        setRiwayatLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (halaman !== 'riwayat') return undefined;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(
+      () => muatRiwayatPesanan(controller.signal),
+      0
+    );
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [halaman, riwayatRefreshKey, muatRiwayatPesanan]);
 
   const kategoriAdmin = useMemo(() => {
     const kategoriProduk = barang
@@ -228,15 +298,39 @@ function App() {
   }, [barang, kategoriTambahan]);
 
   const hasilPencarian = barang.filter((item) => {
-    const cocokPencarian = `${item.nama} ${item.kategori}`
+    return `${item.nama} ${item.kategori}`
       .toLowerCase()
       .includes(pencarian.toLowerCase());
-
-    const cocokKategori =
-      kategoriAktif === 'Semua' || item.kategori === kategoriAktif;
-
-    return cocokPencarian && cocokKategori;
   });
+
+  const categoryOptions = [
+    ...new Set(
+      barang
+        .map((product) =>
+          String(product.category ?? product.kategori ?? 'Lainnya').trim()
+        )
+        .filter(Boolean)
+    ),
+  ];
+
+  const categoryFilteredProducts = hasilPencarian.filter((product) => {
+    const category = String(
+      product.category ?? product.kategori ?? 'Lainnya'
+    ).trim();
+
+    return (
+      selectedCategories.length === 0 ||
+      selectedCategories.includes(category)
+    );
+  });
+
+  const toggleCategory = (category) => {
+    setSelectedCategories((current) =>
+      current.includes(category)
+        ? current.filter((item) => item !== category)
+        : [...current, category]
+    );
+  };
 
   const jumlahBarang = keranjang.reduce(
     (total, item) => total + item.jumlah,
@@ -332,17 +426,6 @@ function App() {
     setBarangDipilih(null);
   }
 
-    function bukaKategori(nama) {
-    const ditemukan = daftarKategori.find(
-      (kategori) =>
-        kategori.toLowerCase() === nama.toLowerCase()
-    );
-
-    setHalaman('katalog');
-    setKategoriAktif(ditemukan || 'Semua');
-    setBarangDipilih(null);
-  }
-
   async function buatPesanan() {
     if (keranjang.length === 0 || checkoutLoading) return;
 
@@ -373,6 +456,23 @@ function App() {
         throw new Error('Server tidak mengembalikan kode pesanan.');
       }
 
+      let riwayatTersimpan = true;
+      try {
+        const kodeRiwayat = bacaKodeRiwayatPesanan();
+        const kodeTerbaru = [
+          ...kodeRiwayat.filter(
+            (kode) => kode !== data.pesanan.kode_pesanan
+          ),
+          data.pesanan.kode_pesanan,
+        ].slice(-100);
+        localStorage.setItem(
+          KUNCI_RIWAYAT_PESANAN,
+          JSON.stringify(kodeTerbaru)
+        );
+      } catch {
+        riwayatTersimpan = false;
+      }
+
       setWaktuSekarang(Date.now());
       setPesananAktif(data.pesanan);
       setKeranjang([]);
@@ -380,7 +480,11 @@ function App() {
 
       await ambilBarang();
 
-      tampilkanPesan('Pesanan berhasil dibuat.');
+      tampilkanPesan(
+        riwayatTersimpan
+          ? 'Pesanan berhasil dibuat.'
+          : 'Pesanan dibuat, tetapi riwayat gagal disimpan di browser ini.'
+      );
     } catch (err) {
       tampilkanPesan(err.message || 'Gagal membuat pesanan.');
     } finally {
@@ -835,30 +939,31 @@ function logoutAdmin() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header
-        className={`store-topbar ${halaman === 'admin' ? 'admin-topbar' : ''}`}
+        className={`store-topbar warung-header ${halaman === 'admin' ? 'admin-topbar' : ''}`}
       >
-          <button
-            onClick={bukaKatalog}
-            className="store-brand"
-            aria-label="Kembali ke menu"
+          <a
+            href="/"
+            onClick={(event) => {
+              event.preventDefault();
+              bukaKatalog();
+            }}
+            className="warung-brand"
+            aria-label="Kembali ke katalog Warung Nenek Yoyoh"
           >
-            <span className="store-brand-icon">🛍️</span>
-            <span className="store-brand-copy">
-              <strong>Warung</strong>
-              <span>Nenek Yoyoh</span>
-            </span>
-          </button>
+            <strong>Warung</strong>
+            <span>Nenek Yoyoh</span>
+          </a>
 
           {halaman !== 'admin' && (
-            <label className="store-search">
-              <span aria-hidden="true">⌕</span>
+            <label className="warung-search">
               <input
                 type="search"
                 value={pencarian}
                 onChange={(event) => setPencarian(event.target.value)}
-                placeholder="Mencari barang"
-                aria-label="Mencari barang"
+                placeholder="Cari sembako, minyak goreng, gula..."
+                aria-label="Cari produk"
               />
+              <span className="search-shortcut">ENTER ↵</span>
             </label>
           )}
 
@@ -886,6 +991,7 @@ function logoutAdmin() {
             )}
 
             <button
+              type="button"
               className="top-icon-button cart-icon-button"
               onClick={bukaKeranjang}
               aria-label="Keranjang belanja"
@@ -894,6 +1000,34 @@ function logoutAdmin() {
               🛒
               <span className="cart-badge">{jumlahBarang}</span>
             </button>
+            {halaman !== 'admin' && (
+              <button
+                type="button"
+                className="top-icon-button"
+                onClick={() => {
+                  setRiwayatLoading(true);
+                  setRiwayatError('');
+                  setHalaman('riwayat');
+                }}
+                aria-label="Riwayat pesanan"
+                title="Riwayat Pesanan"
+              >
+                <svg
+                  aria-hidden="true"
+                  width="21"
+                  height="21"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="5" y="4" width="14" height="17" rx="2" />
+                  <path d="M9 4.5V3h6v1.5M9 10h6M9 14h6M9 18h3" />
+                </svg>
+              </button>
+            )}
           </div>
       </header>
 
@@ -916,7 +1050,7 @@ function logoutAdmin() {
         }`}
       >
         {halaman === 'admin' && adminToken && (
-          <aside className="store-sidebar">
+          <aside className="store-sidebar admin-sidebar">
             <nav className="sidebar-nav">
               <button
                 className={`side-link ${adminView === 'dashboard' ? 'active' : ''}`}
@@ -954,105 +1088,109 @@ function logoutAdmin() {
           {/* ================= KATALOG PELANGGAN ================= */}
           {halaman === 'katalog' && (
             <section className="customer-catalog">
-              <div className="customer-hero">
-                <div className="customer-hero-copy">
-                  <span className="customer-hero-kicker">
+              <section className="hero-banner">
+                <div className="hero-copy">
+                  <span className="hero-label">
                     WARUNG NENEK YOYOH
                   </span>
                   <h1>
-                    Belanja harian,
+                    Kebutuhan harian,
                     <br />
-                    jadi lebih mudah.
+                    tinggal pilih.
                   </h1>
-                  <p>
-                    Temukan kebutuhan rumah tangga, cek harga dan stok,
+                  <p className="hero-description">
+                    Temukan sembako dan kebutuhan harian, cek harga dan stok,
                     lalu tambahkan barang ke keranjang dengan mudah.
                   </p>
-                  <button
-                    type="button"
-                    className="customer-hero-button"
-                    onClick={() =>
-                      document
-                        .getElementById('customer-products')
-                        ?.scrollIntoView({ behavior: 'smooth' })
-                    }
-                  >
-                    Mulai Belanja <span aria-hidden="true">↓</span>
-                  </button>
-                  <div className="customer-hero-benefits">
-                    <span>✓ Harga terlihat jelas</span>
-                    <span>✓ Informasi stok tersedia</span>
+                  <a href="#produk" className="hero-cta">
+                    Mulai Belanja <span>→</span>
+                  </a>
+                  <div className="hero-highlights">
+                    <div>
+                      <strong>01</strong>
+                      <span>Harga transparan</span>
+                    </div>
+                    <div>
+                      <strong>02</strong>
+                      <span>Informasi stok tersedia</span>
+                    </div>
+                    <div>
+                      <strong>03</strong>
+                      <span>Belanja praktis</span>
+                    </div>
                   </div>
                 </div>
+              </section>
 
-                <div className="customer-hero-art" aria-hidden="true">
-                  <div className="customer-hero-circle" />
-                  <div className="customer-hero-bag">🛍️</div>
-                  <span className="customer-hero-float float-one">🌾</span>
-                  <span className="customer-hero-float float-two">🍜</span>
-                  <span className="customer-hero-float float-three">🫒</span>
-                </div>
-              </div>
-
-              <div className="customer-category-section">
-                <div className="customer-section-heading">
-                  <div>
-                    <h2>Mau belanja apa?</h2>
-                    <p>Pilih kategori untuk menemukan barang yang kamu cari.</p>
-                  </div>
-                </div>
-
-                <div className="customer-category-list">
-                  {daftarKategori.map((kategori) => {
-                    const nama = kategori.toLowerCase();
-                    const ikon =
-                      nama === 'semua'
-                        ? '▦'
-                        : nama.includes('beras')
-                          ? '🌾'
-                          : nama.includes('minyak')
-                            ? '🫒'
-                            : nama.includes('mie')
-                              ? '🍜'
-                              : nama.includes('sembako')
-                                ? '🧺'
-                                : '🛍️';
-
-                    return (
-                      <button
-                        key={kategori}
-                        type="button"
-                        onClick={() => bukaKategori(kategori)}
-                        className={`customer-category-chip ${
-                          kategoriAktif === kategori ? 'selected' : ''
-                        }`}
-                        aria-pressed={kategoriAktif === kategori}
-                      >
-                        <span className="customer-category-icon" aria-hidden="true">
-                          {ikon}
-                        </span>
-                        <span>{kategori}</span>
-                        {kategoriAktif === kategori && (
-                          <span className="customer-category-check">✓</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div
-                id="customer-products"
-                className="customer-products-section"
-              >
+              <div className="customer-content">
+                <div
+                  id="produk"
+                  className="customer-products-section"
+                >
                 <div className="customer-section-heading products-heading">
                   <div>
                     <h2>Produk pilihan</h2>
                     <p>Pilih barang yang kamu butuhkan hari ini.</p>
                   </div>
-                  <span className="customer-product-count">
-                    {hasilPencarian.length} produk
-                  </span>
+                  <div className="products-toolbar">
+                    <div className="category-dropdown">
+                      <button
+                        type="button"
+                        className="category-trigger"
+                        aria-expanded={categoryOpen}
+                        onClick={() => setCategoryOpen((open) => !open)}
+                      >
+                        Kategori
+                        {selectedCategories.length > 0 && (
+                          <span className="category-selected-count">
+                            {selectedCategories.length}
+                          </span>
+                        )}
+                        <span className="dropdown-arrow">⌄</span>
+                      </button>
+
+                      {categoryOpen && (
+                        <div className="category-menu">
+                          <div className="category-menu-title">
+                            Filter kategori
+                          </div>
+
+                          {categoryOptions.map((category) => (
+                            <label
+                              className="category-option"
+                              key={category}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedCategories.includes(category)}
+                                onChange={() => toggleCategory(category)}
+                              />
+                              <span>{category}</span>
+                            </label>
+                          ))}
+
+                          <div className="category-menu-footer">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedCategories([])}
+                            >
+                              Reset
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCategoryOpen(false)}
+                            >
+                              Selesai
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <span className="products-count">
+                      {categoryFilteredProducts.length} produk
+                    </span>
+                  </div>
                 </div>
 
                 {loading ? (
@@ -1067,7 +1205,7 @@ function logoutAdmin() {
                       Coba lagi
                     </button>
                   </div>
-                ) : hasilPencarian.length === 0 ? (
+                ) : categoryFilteredProducts.length === 0 ? (
                   <div className="customer-state-message">
                     <span className="customer-loading-icon">🔎</span>
                     <h3>Barang belum ditemukan</h3>
@@ -1076,7 +1214,7 @@ function logoutAdmin() {
                       type="button"
                       onClick={() => {
                         setPencarian('');
-                        setKategoriAktif('Semua');
+                        setSelectedCategories([]);
                       }}
                     >
                       Lihat semua produk
@@ -1084,7 +1222,7 @@ function logoutAdmin() {
                   </div>
                 ) : (
                   <div className="customer-products-grid">
-                    {hasilPencarian.map((item) => {
+                    {categoryFilteredProducts.map((item) => {
                       const stokTersedia = Number(item.stok) > 0;
                       const namaKategori = (item.kategori || '').toLowerCase();
                       const ikonProduk = namaKategori.includes('beras')
@@ -1113,6 +1251,13 @@ function logoutAdmin() {
                                 src={item.foto}
                                 alt={item.nama}
                                 loading="lazy"
+                                style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  objectFit: 'contain',
+                                  objectPosition: 'center',
+                                  display: 'block',
+                                }}
                               />
                             ) : (
                               <div className="customer-product-placeholder">
@@ -1168,6 +1313,7 @@ function logoutAdmin() {
                     })}
                   </div>
                 )}
+                </div>
               </div>
             </section>
           )}
@@ -1773,6 +1919,122 @@ function logoutAdmin() {
             </section>
           )}
 
+          {halaman === 'riwayat' && (
+            <section className="customer-order-history-page">
+              <header className="customer-order-history-heading">
+                <div>
+                  <span className="customer-order-eyebrow">
+                    PESANAN KAMU
+                  </span>
+                  <h1>Riwayat Pesanan</h1>
+                  <p>
+                    Status dan rincian transaksi yang tersimpan di browser ini.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="customer-page-back"
+                  onClick={bukaKatalog}
+                >
+                  <span aria-hidden="true">←</span>
+                  Kembali Belanja
+                </button>
+              </header>
+
+              {riwayatLoading ? (
+                <div className="customer-history-message">
+                  Memuat riwayat pesanan...
+                </div>
+              ) : riwayatError ? (
+                <div className="customer-history-message customer-history-error">
+                  <p role="alert">{riwayatError}</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRiwayatLoading(true);
+                      setRiwayatError('');
+                      setRiwayatRefreshKey((current) => current + 1)
+                    }}
+                  >
+                    Coba lagi
+                  </button>
+                </div>
+              ) : riwayatPesanan.length === 0 ? (
+                <div className="customer-history-message customer-history-empty">
+                  <h2>Belum ada pesanan</h2>
+                  <p>
+                    Pesanan yang dibuat di browser ini akan muncul di sini.
+                  </p>
+                  <button type="button" onClick={bukaKatalog}>
+                    Mulai Belanja
+                  </button>
+                </div>
+              ) : (
+                <div className="customer-history-list">
+                  {riwayatPesanan.map((pesanan) => (
+                    <article
+                      className="customer-history-card"
+                      key={pesanan.kode_pesanan}
+                    >
+                      <header className="customer-history-card-header">
+                        <div>
+                          <span>Nomor pesanan</span>
+                          <strong>{pesanan.kode_pesanan}</strong>
+                        </div>
+                        <span
+                          className={`customer-history-status status-${pesanan.status}`}
+                        >
+                          {labelStatus(pesanan.status)}
+                        </span>
+                      </header>
+
+                      <div className="customer-history-items">
+                        {(pesanan.items || []).map((item, index) => (
+                          <div
+                            className="customer-history-item"
+                            key={`${pesanan.kode_pesanan}-${item.barang_id}-${index}`}
+                          >
+                            <div>
+                              <strong>{item.nama_barang}</strong>
+                              <span>
+                                {item.jumlah} × {formatRupiah(item.harga)}
+                              </span>
+                            </div>
+                            <strong>
+                              {formatRupiah(
+                                item.subtotal ??
+                                  Number(item.jumlah) * Number(item.harga)
+                              )}
+                            </strong>
+                          </div>
+                        ))}
+                      </div>
+
+                      <footer className="customer-history-footer">
+                        <div>
+                          <span>Metode pembayaran</span>
+                          <strong>{pesanan.metode_pembayaran}</strong>
+                        </div>
+                        <div>
+                          <span>Tanggal transaksi</span>
+                          <strong>
+                            {new Date(pesanan.dibuat_pada).toLocaleString(
+                              'id-ID'
+                            )}
+                          </strong>
+                        </div>
+                        <div className="customer-history-total">
+                          <span>Total pembayaran</span>
+                          <strong>{formatRupiah(pesanan.total)}</strong>
+                        </div>
+                      </footer>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
           {halaman === 'admin' && (
             <section>
               {!adminToken ? (
@@ -2171,11 +2433,14 @@ function logoutAdmin() {
                   )}
 
                   {adminView === 'pesanan' && (
-                    <div id="admin-pesanan" className="mt-7">
-                      <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    <section
+                      id="admin-pesanan"
+                      className="admin-orders-page"
+                    >
+                      <header className="admin-orders-header">
                         <div>
-                          <h3 className="text-xl font-bold">Daftar Pesanan</h3>
-                          <p className="mt-1 text-sm text-slate-500">
+                          <h1>Daftar Pesanan</h1>
+                          <p>
                             Kelola dan perbarui status pesanan pelanggan.
                           </p>
                         </div>
@@ -2183,29 +2448,92 @@ function logoutAdmin() {
                           type="button"
                           onClick={() => ambilPesananAdmin()}
                           disabled={adminLoading}
-                          className="rounded-xl border border-purple-600 px-4 py-2 font-semibold text-purple-700 hover:bg-purple-50 disabled:opacity-50"
+                          className="admin-orders-refresh"
                         >
                           {adminLoading ? 'Memuat...' : 'Refresh Pesanan'}
                         </button>
-                      </div>
+                      </header>
+                      {adminError && (
+                        <p role="alert" className="error-message">
+                          {adminError}
+                        </p>
+                      )}
                       {adminPesanan.length === 0 ? (
-                        <p className="empty-message mt-3">Belum ada pesanan.</p>
+                        <p className="admin-orders-empty">Belum ada pesanan.</p>
                       ) : (
-                        <div className="cart-list">
+                        <div className="admin-order-list">
                           {adminPesanan.map((pesanan) => (
-                        <article className="cart-summary" key={pesanan.id}>
-                          <div className="flex flex-wrap justify-between gap-2">
-                            <strong>{pesanan.kode_pesanan}</strong>
-                            <span>{labelStatus(pesanan.status)}</span>
-                          </div>
-                          <p className="mt-2 text-sm">{pesanan.metode_pembayaran} · {formatRupiah(pesanan.total)}</p>
-                          {(pesanan.items || []).map((item, index) => (
-                            <p className="mt-1 text-sm" key={`${item.barang_id}-${index}`}>{item.nama_barang} × {item.jumlah}</p>
-                          ))}
-                          <div className="mt-3 flex flex-wrap gap-2">
+                            <article
+                              className="admin-order-card"
+                              key={pesanan.id}
+                            >
+                              <div className="admin-order-header">
+                                <div className="admin-order-identity">
+                                  <span className="admin-order-caption">
+                                    NOMOR PESANAN
+                                  </span>
+                                  <h3>
+                                    {pesanan.kode_pesanan ?? pesanan.id}
+                                  </h3>
+                                </div>
+
+                                <span
+                                  className={`admin-order-status ${
+                                    String(pesanan.status)
+                                      .toLowerCase()
+                                      .includes('batal')
+                                      ? 'status-cancelled'
+                                      : ['selesai', 'dibayar'].includes(
+                                            pesanan.status
+                                          )
+                                        ? 'status-completed'
+                                        : 'status-pending'
+                                  }`}
+                                >
+                                  {labelStatus(
+                                    pesanan.status ?? 'menunggu_konfirmasi'
+                                  )}
+                                </span>
+                              </div>
+
+                              <div className="admin-order-summary">
+                                <div className="admin-order-info">
+                                  <span>Metode pembayaran</span>
+                                  <strong>
+                                    {pesanan.metode_pembayaran ??
+                                      'Belum tersedia'}
+                                  </strong>
+                                </div>
+                                <div className="admin-order-total">
+                                  <span>Total pembayaran</span>
+                                  <strong>
+                                    {formatRupiah(pesanan.total)}
+                                  </strong>
+                                </div>
+                              </div>
+
+                              <div className="admin-order-items">
+                                <strong className="admin-items-heading">
+                                  Detail barang
+                                </strong>
+                                {(pesanan.items ?? []).map((item, index) => (
+                                  <div
+                                    className="admin-order-item"
+                                    key={item.barang_id ?? index}
+                                  >
+                                    <span>
+                                      {item.nama_barang ?? item.nama} ×{' '}
+                                      {item.jumlah ?? 1}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+
+                              <div className="admin-order-actions">
                             {pesanan.status === 'menunggu_konfirmasi' && pesanan.metode_pembayaran === 'COD' && (
                               <button
-                                className="checkout-button"
+                                type="button"
+                                className="confirm-button"
                                 disabled={adminLoading}
                                 onClick={async () => {
                                   if (!window.confirm('Pastikan uang tunai sudah diterima. Konfirmasi pesanan ini?')) return;
@@ -2229,14 +2557,14 @@ function logoutAdmin() {
                                 Konfirmasi Pembayaran COD
                               </button>
                             )}
-                            {pesanan.status === 'diproses' && <button className="view-all-button" onClick={() => ubahStatusPesanan(pesanan, 'selesai')}>Selesaikan</button>}
-                            {['menunggu_pembayaran', 'menunggu_konfirmasi'].includes(pesanan.status) && <button className="view-all-button" onClick={() => ubahStatusPesanan(pesanan, 'dibatalkan')}>Batalkan</button>}
-                          </div>
-                        </article>
+                            {pesanan.status === 'diproses' && <button type="button" className="confirm-button" disabled={adminLoading} onClick={() => ubahStatusPesanan(pesanan, 'selesai')}>Selesaikan</button>}
+                            {['menunggu_pembayaran', 'menunggu_konfirmasi'].includes(pesanan.status) && <button type="button" className="cancel-button" disabled={adminLoading} onClick={() => ubahStatusPesanan(pesanan, 'dibatalkan')}>Batalkan</button>}
+                              </div>
+                            </article>
                           ))}
                         </div>
                       )}
-                    </div>
+                    </section>
                   )}
                 </>
               )}
@@ -2245,11 +2573,13 @@ function logoutAdmin() {
         </div>
       </main>
 
-      <footer className="mt-12 border-t border-slate-200 bg-white">
-        <div className="mx-auto max-w-6xl px-4 py-6 text-center text-sm text-slate-500 sm:px-6">
-          © {new Date().getFullYear()} Warung Sembako Nenek Yoyoh
-        </div>
-      </footer>
+      {halaman !== 'admin' && (
+        <footer className="mt-12 border-t border-slate-200 bg-white">
+          <div className="mx-auto max-w-6xl px-4 py-6 text-center text-sm text-slate-500 sm:px-6">
+            © {new Date().getFullYear()} Warung Sembako Nenek Yoyoh
+          </div>
+        </footer>
+      )}
 
       {/* ================= DETAIL PRODUK PELANGGAN ================= */}
       {barangDipilih && (

@@ -645,6 +645,82 @@ app.post('/api/checkout', async (req, res) => {
 // CEK STATUS PESANAN
 // ========================
 
+app.post('/api/pesanan/riwayat', async (req, res) => {
+  const { kode_pesanan: kodePesanan } = req.body ?? {};
+
+  if (
+    !Array.isArray(kodePesanan) ||
+    kodePesanan.length > 100 ||
+    kodePesanan.some(
+      (kode) => typeof kode !== 'string' || kode.length > 40
+    )
+  ) {
+    return res.status(400).json({
+      message: 'Daftar kode pesanan tidak valid.',
+    });
+  }
+
+  const kodeUnik = [...new Set(kodePesanan)];
+
+  if (kodeUnik.length === 0) {
+    return res.json({ pesanan: [] });
+  }
+
+  try {
+    const pesanan = await withTransaction(async (client) => {
+      const orderIds = await client.query(
+        `SELECT id
+         FROM pesanan
+         WHERE kode_pesanan = ANY($1::varchar[])
+         ORDER BY id
+         FOR UPDATE`,
+        [kodeUnik]
+      );
+
+      for (const order of orderIds.rows) {
+        await expireOrder(client, order.id);
+      }
+
+      const result = await client.query(
+        `SELECT
+          p.kode_pesanan,
+          p.metode_pembayaran,
+          p.status,
+          p.total,
+          p.dibuat_pada,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'barang_id', d.barang_id,
+                'nama_barang', d.nama_barang,
+                'harga', d.harga,
+                'jumlah', d.jumlah,
+                'subtotal', d.subtotal
+              )
+              ORDER BY d.id
+            ) FILTER (WHERE d.pesanan_id IS NOT NULL),
+            '[]'::json
+          ) AS items
+        FROM pesanan p
+        LEFT JOIN detail_pesanan d ON d.pesanan_id = p.id
+        WHERE p.kode_pesanan = ANY($1::varchar[])
+        GROUP BY p.id
+        ORDER BY p.dibuat_pada DESC`,
+        [kodeUnik]
+      );
+
+      return result.rows;
+    });
+
+    return res.json({ pesanan });
+  } catch (error) {
+    console.error('Gagal mengambil riwayat pesanan:', error.message);
+    return res.status(500).json({
+      message: 'Riwayat pesanan gagal dimuat.',
+    });
+  }
+});
+
 app.get('/api/admin/pesanan', autentikasiAdmin, async (req, res) => {
   try {
     const result = await db.query(`
