@@ -5369,3 +5369,45 @@ button {
 .admin-sidebar .sidebar-nav {
   margin-top: 0;
 }
+
+.customer-order-qris {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 22px;
+  border: 1px solid #e9e4f0;
+  border-radius: 13px;
+  background: #fff;
+  text-align: center;
+}
+
+.customer-order-qris h2 {
+  margin: 0;
+  color: #302543;
+  font-size: 19px;
+}
+
+.customer-order-qris img {
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  object-fit: contain;
+  padding: 8px;
+  border: 1px solid #e9e4f0;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.customer-order-qris strong {
+  color: #302543;
+  font-size: 18px;
+}
+
+.customer-order-qris p {
+  max-width: 440px;
+  margin: 0;
+  color: #756b82;
+  font-size: 13px;
+  line-height: 1.6;
+}

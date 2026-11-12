@@ -5,6 +5,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const { coreApi } = require('./config/midtrans');
 
 const app = express();
 
@@ -19,8 +20,9 @@ const db = new Pool({
   password: process.env.DB_PASSWORD,
 });
 
-// Batas waktu pembayaran: 5 menit.
+// Batas waktu pembayaran COD: 5 menit.
 const CHECKOUT_TIMEOUT_MINUTES = 5;
+const QRIS_TIMEOUT_MINUTES = 15;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -400,6 +402,33 @@ async function expireOrder(client, orderId) {
   return true;
 }
 
+async function batalkanPesananSegera(kodePesanan) {
+  await withTransaction(async (client) => {
+    const result = await client.query(
+      `SELECT id, status
+       FROM pesanan
+       WHERE kode_pesanan = $1
+       FOR UPDATE`,
+      [kodePesanan]
+    );
+
+    const pesanan = result.rows[0];
+
+    if (!pesanan || pesanan.status !== 'menunggu_pembayaran') {
+      return;
+    }
+
+    await client.query(
+      `UPDATE pesanan
+       SET batas_waktu = NOW()
+       WHERE id = $1`,
+      [pesanan.id]
+    );
+
+    await expireOrder(client, pesanan.id);
+  });
+}
+
 // ========================
 // CHECKOUT
 // ========================
@@ -558,7 +587,9 @@ app.post('/api/checkout', async (req, res) => {
           metode_pembayaran,
           statusAwal,
           total,
-          CHECKOUT_TIMEOUT_MINUTES,
+          metode_pembayaran === 'QRIS'
+            ? QRIS_TIMEOUT_MINUTES
+            : CHECKOUT_TIMEOUT_MINUTES,
         ]
       );
 
@@ -626,6 +657,109 @@ app.post('/api/checkout', async (req, res) => {
       };
     });
 
+    if (metode_pembayaran === 'QRIS') {
+      let chargeResponse;
+
+      try {
+        const grossAmount = Number(order.total);
+
+        if (!Number.isSafeInteger(grossAmount) || grossAmount <= 0) {
+          throw new Error('Nominal pembayaran QRIS tidak valid.');
+        }
+
+        chargeResponse = await coreApi.charge({
+          payment_type: 'qris',
+          transaction_details: {
+            order_id: order.kode_pesanan,
+            gross_amount: grossAmount,
+          },
+          qris: {
+            acquirer: 'gopay',
+          },
+          custom_expiry: {
+            expiry_duration: QRIS_TIMEOUT_MINUTES,
+            unit: 'minute',
+          },
+        });
+
+        const qrAction =
+          chargeResponse.actions?.find(
+            (action) => action.name === 'generate-qr-code-v2'
+          ) ||
+          chargeResponse.actions?.find(
+            (action) => action.name === 'generate-qr-code'
+          );
+
+        if (
+          !chargeResponse.transaction_id ||
+          chargeResponse.transaction_status !== 'pending' ||
+          !qrAction?.url
+        ) {
+          throw new Error('Midtrans tidak memberikan QR Code yang valid.');
+        }
+
+        const saved = await db.query(
+          `UPDATE pesanan
+           SET midtrans_transaction_id = $1,
+               qr_code_url = $2,
+               diperbarui_pada = NOW()
+           WHERE kode_pesanan = $3
+             AND status IN ('menunggu_pembayaran', 'dibayar')
+             AND (
+               midtrans_transaction_id IS NULL OR
+               midtrans_transaction_id = $1
+             )
+           RETURNING status`,
+          [
+            chargeResponse.transaction_id,
+            qrAction.url,
+            order.kode_pesanan,
+          ]
+        );
+
+        if (saved.rowCount !== 1) {
+          throw new Error(
+            'Gagal menyimpan informasi QRIS ke database.'
+          );
+        }
+
+        order.status = saved.rows[0].status;
+        order.midtrans_transaction_id = chargeResponse.transaction_id;
+        order.qr_code_url = qrAction.url;
+      } catch (error) {
+        console.error(
+          'Gagal membuat QRIS:',
+          error.ApiResponse || error.message
+        );
+
+        if (chargeResponse?.transaction_id) {
+          try {
+            await coreApi.transaction.cancel(order.kode_pesanan);
+          } catch (cancelError) {
+            console.error(
+              'Gagal membatalkan transaksi Midtrans:',
+              cancelError.message
+            );
+          }
+        }
+
+        try {
+          await batalkanPesananSegera(order.kode_pesanan);
+        } catch (cancelError) {
+          console.error(
+            'Gagal membatalkan pesanan setelah pembuatan QRIS gagal:',
+            cancelError.message
+          );
+        }
+
+        const checkoutError = new Error(
+          'Gagal membuat pembayaran QRIS. Silakan coba kembali.'
+        );
+        checkoutError.statusCode = 502;
+        throw checkoutError;
+      }
+    }
+
     return res.status(201).json({
       message: 'Pesanan berhasil dibuat.',
       pesanan: order,
@@ -687,6 +821,7 @@ app.post('/api/pesanan/riwayat', async (req, res) => {
           p.metode_pembayaran,
           p.status,
           p.total,
+          p.qr_code_url,
           p.dibuat_pada,
           COALESCE(
             json_agg(
@@ -808,7 +943,9 @@ app.get('/api/pesanan/:kode', async (req, res) => {
         metode_pembayaran: pesanan.metode_pembayaran,
         status: pesanan.status,
         total: pesanan.total,
+        midtrans_transaction_id: pesanan.midtrans_transaction_id,
         batas_waktu: pesanan.batas_waktu,
+        qr_code_url: pesanan.qr_code_url,
         dibuat_pada: pesanan.dibuat_pada,
         diperbarui_pada: pesanan.diperbarui_pada,
         items: details.rows,
@@ -1051,6 +1188,187 @@ app.patch(
   }
 );
 
+app.post('/api/midtrans/notification', async (req, res) => {
+  try {
+    const notification = req.body ?? {};
+    const serverKey = process.env.MIDTRANS_NOTIFICATION_SERVER_KEY;
+
+    if (!serverKey) {
+      console.error('MIDTRANS_NOTIFICATION_SERVER_KEY tidak ditemukan.');
+      return res.status(500).json({
+        message: 'Konfigurasi Midtrans belum tersedia.',
+      });
+    }
+
+    if (
+      typeof notification !== 'object' ||
+      Array.isArray(notification)
+    ) {
+      return res.status(400).json({
+        message: 'Format notifikasi tidak valid.',
+      });
+    }
+
+    const {
+      order_id,
+      transaction_id,
+      transaction_status,
+      status_code,
+      gross_amount,
+      signature_key,
+      fraud_status,
+    } = notification;
+
+    if (
+      typeof order_id !== 'string' ||
+      !order_id ||
+      typeof transaction_id !== 'string' ||
+      !transaction_id ||
+      typeof transaction_status !== 'string' ||
+      !transaction_status ||
+      typeof status_code !== 'string' ||
+      !/^\d+$/.test(status_code) ||
+      typeof gross_amount !== 'string' ||
+      !gross_amount ||
+      !Number.isFinite(Number(gross_amount)) ||
+      Number(gross_amount) <= 0 ||
+      typeof signature_key !== 'string' ||
+      !/^[a-f\d]{128}$/i.test(signature_key) ||
+      (fraud_status !== undefined && typeof fraud_status !== 'string')
+    ) {
+      return res.status(400).json({
+        message: 'Format notifikasi tidak valid.',
+      });
+    }
+
+    const expectedSignature = crypto
+      .createHash('sha512')
+      .update(
+        String(order_id) +
+        String(status_code) +
+        String(gross_amount) +
+        serverKey
+      )
+      .digest('hex');
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+    const receivedBuffer = Buffer.from(signature_key, 'hex');
+
+    if (
+      expectedBuffer.length !== receivedBuffer.length ||
+      !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
+    ) {
+      console.warn('Signature Midtrans tidak valid untuk:', order_id);
+      return res.status(401).json({
+        message: 'Signature tidak valid.',
+      });
+    }
+
+    const result = await withTransaction(async (client) => {
+      const orderResult = await client.query(
+        `SELECT *
+         FROM pesanan
+         WHERE kode_pesanan = $1
+         FOR UPDATE`,
+        [order_id]
+      );
+
+      const order = orderResult.rows[0];
+
+      if (!order) return 'pesanan_tidak_ditemukan';
+      if (order.metode_pembayaran !== 'QRIS') return 'bukan_transaksi_qris';
+
+      if (
+        !order.midtrans_transaction_id ||
+        order.midtrans_transaction_id !== transaction_id
+      ) {
+        return 'transaction_id_tidak_cocok';
+      }
+
+      const amount = Number(gross_amount);
+      if (
+        !Number.isFinite(amount) ||
+        !Number.isFinite(Number(order.total)) ||
+        amount.toFixed(2) !== Number(order.total).toFixed(2)
+      ) {
+        return 'nominal_tidak_cocok';
+      }
+
+      if (transaction_status === 'settlement') {
+        if (
+          status_code !== '200' ||
+          (fraud_status !== undefined &&
+            fraud_status.toLowerCase() !== 'accept')
+        ) {
+          return 'pembayaran_belum_terverifikasi';
+        }
+
+        if (['dibayar', 'diproses', 'selesai'].includes(order.status)) {
+          return 'sudah_dibayar';
+        }
+
+        if (order.status === 'dibatalkan') {
+          return 'pembayaran_terlambat';
+        }
+
+        if (order.status !== 'menunggu_pembayaran') {
+          return 'status_pesanan_tidak_valid';
+        }
+
+        await client.query(
+          `UPDATE pesanan
+           SET status = 'dibayar',
+               batas_waktu = NULL,
+               diperbarui_pada = NOW()
+           WHERE id = $1`,
+          [order.id]
+        );
+
+        await client.query(
+          `UPDATE reservasi_stok
+           SET status = 'terpakai',
+               diperbarui_pada = NOW()
+           WHERE pesanan_id = $1
+             AND status = 'aktif'`,
+          [order.id]
+        );
+
+        return 'pembayaran_berhasil';
+      }
+
+      if (
+        ['expire', 'cancel', 'deny'].includes(transaction_status)
+      ) {
+        if (order.status !== 'menunggu_pembayaran') {
+          return 'pesanan_sudah_diproses';
+        }
+
+        await client.query(
+          `UPDATE pesanan
+           SET batas_waktu = NOW()
+           WHERE id = $1`,
+          [order.id]
+        );
+
+        await expireOrder(client, order.id);
+        return 'pesanan_dibatalkan';
+      }
+
+      return 'menunggu_pembayaran';
+    });
+
+    console.log(`Midtrans notification: ${order_id} => ${result}`);
+
+    return res.status(200).json({
+      message: 'Notifikasi Midtrans berhasil diterima.',
+      result,
+    });
+  } catch (error) {
+    console.error('Midtrans webhook error:', error.message);
+    return res.status(500).json({
+      message: 'Gagal memproses notifikasi Midtrans.',
+    });
+  }
+});
 
 // ========================
 // PROSES KEDALUWARSA OTOMATIS

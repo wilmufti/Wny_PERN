@@ -1,0 +1,8 @@
+{
+  "order_id": "payment_notif_test_M871911646_a1305df2-9c15-4a4a-a264-7260d9256481",
+  "transaction_id": "513f1f01-c9da-474c-9fc9-d5c64364b709",
+  "transaction_status": "settlement",
+  "status_code": "200",
+  "gross_amount": "105000.00",
+  "signature_key": "f1dd86f9d83ca5fef2ef2496a7afe07c51011b13040c08971c1349a70d1ba78d244e081ef379513ad4ad46d784d254461ae442bc43aa66d3dd189f5383611f59"
+}

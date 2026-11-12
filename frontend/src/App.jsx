@@ -1557,7 +1557,7 @@ function logoutAdmin() {
                           <span className="customer-payment-copy">
                             <strong>QRIS</strong>
                             <span>
-                              Pembayaran menggunakan QRIS resmi dari warung.
+                              Pindai QRIS yang dibuat khusus untuk pesanan ini.
                             </span>
                           </span>
                           <span className="customer-payment-radio" />
@@ -1592,7 +1592,7 @@ function logoutAdmin() {
                         <span aria-hidden="true">ⓘ</span>
                         <p>
                           {metodePembayaran === 'QRIS'
-                            ? 'Gunakan QRIS resmi yang disediakan warung. Pembayaran perlu dikonfirmasi dan tidak terverifikasi otomatis oleh aplikasi.'
+                            ? 'QRIS dibuat otomatis oleh Midtrans. Scan kode pembayaran pada halaman detail pesanan. Pembayaran akan diverifikasi secara otomatis.'
                             : 'Siapkan pembayaran tunai dan temui penjaga warung agar pembayaran dapat dikonfirmasi.'}
                         </p>
                       </div>
@@ -1819,7 +1819,7 @@ function logoutAdmin() {
                     <p>
                       {detikTersisa > 0
                         ? pesananAktif.metode_pembayaran === 'QRIS'
-                          ? 'Gunakan QRIS resmi dari warung. Pembayaran belum otomatis terverifikasi.'
+                          ? 'Scan QRIS yang tampil di bawah ini. Status pembayaran akan diperbarui otomatis setelah Midtrans mengonfirmasi pembayaran.'
                           : 'Temui penjaga warung untuk membayar tunai dan meminta konfirmasi.'
                         : 'Pesanan sedang menunggu pembaruan status dari server.'}
                     </p>
@@ -1830,6 +1830,23 @@ function logoutAdmin() {
                   </div>
                 </section>
               )}
+
+              {pesananAktif.status === 'menunggu_pembayaran' &&
+                pesananAktif.metode_pembayaran === 'QRIS' &&
+                pesananAktif.qr_code_url && (
+                  <section className="customer-order-qris">
+                    <h2>Pembayaran QRIS</h2>
+                    <img
+                      src={pesananAktif.qr_code_url}
+                      alt="QRIS pembayaran pesanan"
+                    />
+                    <strong>{formatRupiah(pesananAktif.total)}</strong>
+                    <p>
+                      Pindai kode QR ini menggunakan aplikasi pembayaran
+                      pilihan kamu sebelum batas waktu berakhir.
+                    </p>
+                  </section>
+                )}
 
               {pesananAktif.status === 'dibatalkan' && (
                 <div className="customer-order-message cancelled-message">

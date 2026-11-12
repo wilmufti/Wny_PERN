@@ -3,15 +3,15 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-"scripts": {
-  "dev": "node --watch index.js",
-  "start": "node index.js",
-  "migrate:create": "node-pg-migrate create",
-  "migrate:up": "node-pg-migrate up --config-file=migrate.config.mjs",
-  "migrate:down": "node-pg-migrate down --config-file=migrate.config.mjs",
-  "test": "echo \"Error: no test specified\" && exit 1",
-  "db:seed": "node seeds/seed.js"
-},
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "migrate:create": "node-pg-migrate create",
+    "migrate:up": "node-pg-migrate up --config-file=migrate.config.mjs",
+    "migrate:down": "node-pg-migrate down --config-file=migrate.config.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "db:seed": "node seeds/seed.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -21,6 +21,7 @@
     "dotenv": "^18.0.7",
     "express": "^5.3.0",
     "jsonwebtoken": "^9.0.3",
+    "midtrans-client": "^1.4.3",
     "pg": "^8.23.1"
   },
   "devDependencies": {
