@@ -1,0 +1,22 @@
+{
+  "transaction_type": "on-us",
+  "transaction_time": "2026-11-07 15:30:55",
+  "transaction_status": "settlement",
+  "transaction_id": "d0fd0990-2ada-41c1-9b9c-e769f05feb80",
+  "status_message": "midtrans payment notification",
+  "status_code": "200",
+  "signature_key": "d867368dc161dfb5e580423ecb4c17d2775197734aa0755bfb863b563088cc422086b000daa9df0e3b4979559d14c8d6e9d5ca01c903f5b509e5aba7978f2fe1",
+  "settlement_time": "2026-11-07 15:31:59",
+  "pop_id": "60db7ee3-b4d6-4446-b4d6-d979aa4f784f",
+  "payment_type": "qris",
+  "order_id": "WNY-1794040254560-8B26F1C6",
+  "merchant_id": "M871911646",
+  "merchant_cross_reference_id": "f3dbe866-f024-4d1e-a162-38fed0abf1f0",
+  "issuer": "gopay",
+  "gross_amount": "140458.00",
+  "fraud_status": "accept",
+  "expiry_time": "2026-11-07 15:45:55",
+  "customer_details": {},
+  "currency": "IDR",
+  "acquirer": "gopay"
+}
